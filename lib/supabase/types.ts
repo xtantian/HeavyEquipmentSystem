@@ -190,8 +190,72 @@ export interface Database {
           }
         ];
       };
+
+      /**
+       * rental_requests
+       * Captures rental quote requests submitted from equipment detail pages.
+       */
+      rental_requests: {
+        Row: {
+          id: string;
+          equipment_id: string;
+          equipment_name: string;
+          user_id: string | null;
+          customer_name: string | null;
+          customer_email: string | null;
+          customer_phone: string | null;
+          rental_duration_days: number;
+          daily_rate: number;
+          estimated_total: number;
+          project_location: string | null;
+          notes: string | null;
+          status: "pending" | "approved" | "rejected" | "completed" | "cancelled";
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          equipment_id: string;
+          equipment_name: string;
+          user_id?: string | null;
+          customer_name?: string | null;
+          customer_email?: string | null;
+          customer_phone?: string | null;
+          rental_duration_days?: number;
+          daily_rate?: number;
+          estimated_total?: number;
+          project_location?: string | null;
+          notes?: string | null;
+          status?: "pending" | "approved" | "rejected" | "completed" | "cancelled";
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          id?: string;
+          equipment_id?: string;
+          equipment_name?: string;
+          user_id?: string | null;
+          customer_name?: string | null;
+          customer_email?: string | null;
+          customer_phone?: string | null;
+          rental_duration_days?: number;
+          daily_rate?: number;
+          estimated_total?: number;
+          project_location?: string | null;
+          notes?: string | null;
+          status?: "pending" | "approved" | "rejected" | "completed" | "cancelled";
+          created_at?: string;
+          updated_at?: string;
+        };
+        Relationships: [];
+      };
     };
-    Views: { [_ in never]: never };
+    Views: {
+      quotes: {
+        Row: Database["public"]["Tables"]["rental_requests"]["Row"];
+        Relationships: [];
+      };
+    };
     Functions: {
       is_staff_or_admin: {
         Args: Record<PropertyKey, never>;
@@ -215,3 +279,7 @@ export type EquipmentCategoryUpdate = Database["public"]["Tables"]["equipment_ca
 export type EquipmentRow = Database["public"]["Tables"]["equipment"]["Row"];
 export type EquipmentInsert = Database["public"]["Tables"]["equipment"]["Insert"];
 export type EquipmentUpdate = Database["public"]["Tables"]["equipment"]["Update"];
+
+export type RentalRequestRow = Database["public"]["Tables"]["rental_requests"]["Row"];
+export type RentalRequestInsert = Database["public"]["Tables"]["rental_requests"]["Insert"];
+export type RentalRequestUpdate = Database["public"]["Tables"]["rental_requests"]["Update"];

@@ -2,7 +2,8 @@
 
 import * as React from "react";
 import Image from "next/image";
-import { CheckCircle2, Truck, FileText, ArrowRight } from "lucide-react";
+import { useAuth, useUser } from "@clerk/nextjs";
+import { CheckCircle2, Truck, FileText, ArrowRight, Loader2, AlertCircle } from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -15,6 +16,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { EquipmentItem } from "./types";
 import { formatCurrency } from "@/lib/utils";
+import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 
 interface EquipmentDetailsModalProps {
   equipment: EquipmentItem | null;
@@ -27,12 +29,74 @@ export function EquipmentDetailsModal({
   isOpen,
   onClose,
 }: EquipmentDetailsModalProps) {
+  const { getToken } = useAuth();
+  const { user } = useUser();
   const [requestSubmitted, setRequestSubmitted] = React.useState(false);
+  const [isSubmitting, setIsSubmitting] = React.useState(false);
+  const [submitError, setSubmitError] = React.useState<string | null>(null);
 
   const handleOpenChange = (open: boolean) => {
     if (!open) {
       setRequestSubmitted(false);
+      setSubmitError(null);
+      setIsSubmitting(false);
       onClose();
+    }
+  };
+
+  const handleRequestQuote = async () => {
+    if (!equipment) return;
+
+    setIsSubmitting(true);
+    setSubmitError(null);
+
+    try {
+      // 1. Obtain Clerk session token if user is signed in
+      const token = await getToken();
+
+      // 2. Initialize browser Supabase client
+      const supabase = createSupabaseBrowserClient(token);
+
+      // 3. Construct payload strictly matching the Supabase schema
+      const payload = {
+        equipment_id: equipment.id,
+        equipment_name: equipment.name,
+        user_id: user?.id ?? null,
+        customer_name:
+          user?.fullName ||
+          (user?.firstName ? `${user.firstName} ${user.lastName || ""}`.trim() : null) ||
+          "Prospective Contractor",
+        customer_email: user?.primaryEmailAddress?.emailAddress ?? null,
+        customer_phone: null,
+        rental_duration_days: 1,
+        daily_rate: equipment.rate.daily,
+        estimated_total: equipment.rate.daily,
+        project_location: null,
+        notes: `Quote inquiry for ${equipment.name} (${equipment.model})`,
+        status: "pending" as const,
+      };
+
+      // 4. Insert rental quote request into Supabase
+      const { data, error } = await supabase
+        .from("rental_requests")
+        .insert([payload])
+        .select();
+
+      if (error) {
+        console.error("Supabase insert error:", error);
+        setSubmitError(error.message || "Failed to submit rental quote request.");
+        return;
+      }
+
+      console.log("Rental quote request submitted successfully:", data);
+      setRequestSubmitted(true);
+    } catch (error: unknown) {
+      console.error("Supabase insert error:", error);
+      setSubmitError(
+        error instanceof Error ? error.message : "An unexpected network or database error occurred."
+      );
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -159,32 +223,52 @@ export function EquipmentDetailsModal({
             </div>
           </div>
 
-          {/* Request Feedback Alert */}
+          {/* Error Feedback Alert */}
+          {submitError && (
+            <div className="mt-4 flex items-start gap-2.5 rounded-xl border border-destructive/40 bg-destructive/10 p-3.5 text-xs text-destructive">
+              <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+              <div>
+                <p className="font-semibold">Unable to submit quote request</p>
+                <p className="mt-0.5 opacity-90">{submitError}</p>
+              </div>
+            </div>
+          )}
+
+          {/* Success Feedback Alert */}
           {requestSubmitted && (
             <div className="mt-4 rounded-xl border border-emerald-500/40 bg-emerald-500/10 p-3.5 text-xs text-emerald-800 dark:text-emerald-300">
               <div className="flex items-center gap-2 font-semibold">
                 <CheckCircle2 className="h-4 w-4" />
-                Rental Inquire Initiated
+                Rental Quote Request Sent
               </div>
               <p className="mt-1">
-                Your request for {equipment.name} has been staged. When connected with Supabase authentication, contractor requests are automatically routed to fleet dispatch officers.
+                Your rental quote request for <span className="font-semibold">{equipment.name}</span> has been saved to the database. Fleet dispatch officers will review machine availability and follow up promptly.
               </p>
             </div>
           )}
 
           {/* Footer CTAs */}
           <DialogFooter className="mt-6 gap-2 sm:gap-0">
-            <Button variant="outline" onClick={onClose}>
+            <Button variant="outline" onClick={onClose} disabled={isSubmitting}>
               Close
             </Button>
             {!requestSubmitted ? (
               <Button
-                onClick={() => setRequestSubmitted(true)}
-                disabled={!isAvailable}
+                onClick={handleRequestQuote}
+                disabled={!isAvailable || isSubmitting}
                 className="font-medium"
               >
-                {isAvailable ? "Request Rental Quote" : "Notify When Available"}
-                <ArrowRight className="ml-1.5 h-4 w-4" />
+                {isSubmitting ? (
+                  <>
+                    <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
+                    Submitting Quote...
+                  </>
+                ) : (
+                  <>
+                    {isAvailable ? "Request Rental Quote" : "Notify When Available"}
+                    <ArrowRight className="ml-1.5 h-4 w-4" />
+                  </>
+                )}
               </Button>
             ) : (
               <Button variant="secondary" onClick={onClose}>
