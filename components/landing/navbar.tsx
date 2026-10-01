@@ -11,6 +11,7 @@ const navLinks = [
   { name: "Categories", href: "#categories" },
   { name: "How It Works", href: "#how-it-works" },
   { name: "Why Choose Us", href: "#benefits" },
+  { name: "Rental Inquiry", href: "/inquiry" },
 ];
 
 export function Navbar() {

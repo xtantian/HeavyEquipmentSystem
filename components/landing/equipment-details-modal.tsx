@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import Image from "next/image";
+import Link from "next/link";
 import { useAuth, useUser } from "@clerk/nextjs";
 import { CheckCircle2, Truck, FileText, ArrowRight, Loader2, AlertCircle } from "lucide-react";
 import {
@@ -57,28 +58,24 @@ export function EquipmentDetailsModal({
       // 2. Initialize browser Supabase client
       const supabase = createSupabaseBrowserClient(token);
 
-      // 3. Construct payload strictly matching the Supabase schema
+      // 3. Construct payload matching rental_inquiries schema
       const payload = {
-        equipment_id: equipment.id,
         equipment_name: equipment.name,
-        user_id: user?.id ?? null,
-        customer_name:
+        full_name:
           user?.fullName ||
           (user?.firstName ? `${user.firstName} ${user.lastName || ""}`.trim() : null) ||
           "Prospective Contractor",
-        customer_email: user?.primaryEmailAddress?.emailAddress ?? null,
-        customer_phone: null,
-        rental_duration_days: 1,
-        daily_rate: equipment.rate.daily,
-        estimated_total: equipment.rate.daily,
+        email: user?.primaryEmailAddress?.emailAddress || "inquiry@client.com",
+        phone: "Submitted via machine details modal",
         project_location: null,
-        notes: `Quote inquiry for ${equipment.name} (${equipment.model})`,
+        start_date: null,
+        message: `Quote inquiry for ${equipment.name} (${equipment.model}) at ${formatCurrency(equipment.rate.daily)}/day`,
         status: "pending" as const,
       };
 
       // 4. Insert rental quote request into Supabase
       const { data, error } = await supabase
-        .from("rental_requests")
+        .from("rental_inquiries")
         .insert([payload])
         .select();
 
@@ -248,10 +245,19 @@ export function EquipmentDetailsModal({
           )}
 
           {/* Footer CTAs */}
-          <DialogFooter className="mt-6 gap-2 sm:gap-0">
-            <Button variant="outline" onClick={onClose} disabled={isSubmitting}>
-              Close
-            </Button>
+          <DialogFooter className="mt-6 flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2 sm:gap-0">
+            <div className="flex items-center gap-2">
+              <Button variant="outline" onClick={onClose} disabled={isSubmitting}>
+                Close
+              </Button>
+              <Link
+                href={`/inquiry?equipment=${encodeURIComponent(equipment.name)}`}
+                onClick={onClose}
+                className="inline-flex items-center text-xs font-medium text-primary hover:underline px-2 py-1"
+              >
+                Detailed Form →
+              </Link>
+            </div>
             {!requestSubmitted ? (
               <Button
                 onClick={handleRequestQuote}

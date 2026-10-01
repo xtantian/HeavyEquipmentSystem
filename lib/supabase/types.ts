@@ -249,6 +249,59 @@ export interface Database {
         };
         Relationships: [];
       };
+
+      /**
+       * rental_inquiries
+       * Captures heavy equipment rental inquiries from query parameters and inquiry forms.
+       */
+      rental_inquiries: {
+        Row: {
+          id: string;
+          equipment_name: string;
+          full_name: string;
+          email: string;
+          phone: string;
+          project_location: string | null;
+          start_date: string | null;
+          end_date: string | null;
+          message: string | null;
+          rental_city: string | null;
+          status: "pending" | "contacted" | "quoted" | "approved" | "rejected" | "completed";
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          equipment_name: string;
+          full_name: string;
+          email: string;
+          phone: string;
+          project_location?: string | null;
+          start_date?: string | null;
+          end_date?: string | null;
+          message?: string | null;
+          rental_city?: string | null;
+          status?: "pending" | "contacted" | "quoted" | "approved" | "rejected" | "completed";
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          id?: string;
+          equipment_name?: string;
+          full_name?: string;
+          email?: string;
+          phone?: string;
+          project_location?: string | null;
+          start_date?: string | null;
+          end_date?: string | null;
+          message?: string | null;
+          rental_city?: string | null;
+          status?: "pending" | "contacted" | "quoted" | "approved" | "rejected" | "completed";
+          created_at?: string;
+          updated_at?: string;
+        };
+        Relationships: [];
+      };
     };
     Views: {
       quotes: {
@@ -283,3 +336,7 @@ export type EquipmentUpdate = Database["public"]["Tables"]["equipment"]["Update"
 export type RentalRequestRow = Database["public"]["Tables"]["rental_requests"]["Row"];
 export type RentalRequestInsert = Database["public"]["Tables"]["rental_requests"]["Insert"];
 export type RentalRequestUpdate = Database["public"]["Tables"]["rental_requests"]["Update"];
+
+export type RentalInquiryRow = Database["public"]["Tables"]["rental_inquiries"]["Row"];
+export type RentalInquiryInsert = Database["public"]["Tables"]["rental_inquiries"]["Insert"];
+export type RentalInquiryUpdate = Database["public"]["Tables"]["rental_inquiries"]["Update"];
