@@ -26,10 +26,19 @@ export type Json =
 export type UserRole = "customer" | "staff" | "manager" | "admin";
 
 /**
+ * Equipment operational availability status.
+ *
+ * - available   – unit is functional and ready for booking/dispatch.
+ * - reserved    – unit is allocated to an upcoming approved rental schedule.
+ * - maintenance – unit is offline for servicing, inspection, or repair.
+ * - inactive    – unit is retired or decommissioned from active fleet.
+ */
+export type EquipmentStatus = "available" | "reserved" | "maintenance" | "inactive";
+
+/**
  * Type-safe Supabase database schema.
  *
- * Add new tables here as the domain model grows. Keep this file the single
- * source of truth for database shape; import `Database` into every Supabase
+ * Source of truth for database shape; import `Database` into every Supabase
  * client to get full TypeScript inference on queries.
  */
 export interface Database {
@@ -77,21 +86,132 @@ export interface Database {
           created_at?: string;
           updated_at?: string;
         };
-        /**
-         * Required by @supabase/supabase-js GenericTable constraint.
-         * profiles has no foreign-key relationships yet; extend this array
-         * when FK relations to other tables are added.
-         */
         Relationships: [];
       };
+
+      /**
+       * equipment_categories
+       * High-level classification for heavy machinery units.
+       */
+      equipment_categories: {
+        Row: {
+          id: string;
+          name: string;
+          slug: string | null;
+          description: string | null;
+          icon_name: string | null;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          name: string;
+          slug?: string | null;
+          description?: string | null;
+          icon_name?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          id?: string;
+          name?: string;
+          slug?: string | null;
+          description?: string | null;
+          icon_name?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Relationships: [];
+      };
+
+      /**
+       * equipment
+       * Heavy machinery fleet inventory available for rental operations.
+       */
+      equipment: {
+        Row: {
+          id: string;
+          category_id: string;
+          name: string;
+          model: string;
+          description: string | null;
+          image_url: string | null;
+          daily_rate: number;
+          weekly_rate: number;
+          status: EquipmentStatus;
+          power_source: string | null;
+          operating_weight: string | null;
+          specs: Json;
+          suitable_projects: string[];
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          category_id: string;
+          name: string;
+          model: string;
+          description?: string | null;
+          image_url?: string | null;
+          daily_rate: number;
+          weekly_rate: number;
+          status?: EquipmentStatus;
+          power_source?: string | null;
+          operating_weight?: string | null;
+          specs?: Json;
+          suitable_projects?: string[];
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          id?: string;
+          category_id?: string;
+          name?: string;
+          model?: string;
+          description?: string | null;
+          image_url?: string | null;
+          daily_rate?: number;
+          weekly_rate?: number;
+          status?: EquipmentStatus;
+          power_source?: string | null;
+          operating_weight?: string | null;
+          specs?: Json;
+          suitable_projects?: string[];
+          created_at?: string;
+          updated_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "equipment_category_id_fkey";
+            columns: ["category_id"];
+            isOneToOne: false;
+            referencedRelation: "equipment_categories";
+            referencedColumns: ["id"];
+          }
+        ];
+      };
     };
-    // No views or functions defined yet.
-    // Uses { [_ in never]: never } (the empty-object type) to satisfy the
-    // GenericSchema constraint without mapping any keys.
     Views: { [_ in never]: never };
-    Functions: { [_ in never]: never };
+    Functions: {
+      is_staff_or_admin: {
+        Args: Record<PropertyKey, never>;
+        Returns: boolean;
+      };
+    };
     Enums: {
       user_role: UserRole;
+      equipment_status: EquipmentStatus;
     };
   };
 }
+
+/**
+ * Convenience Type Aliases for Application Code
+ */
+export type EquipmentCategoryRow = Database["public"]["Tables"]["equipment_categories"]["Row"];
+export type EquipmentCategoryInsert = Database["public"]["Tables"]["equipment_categories"]["Insert"];
+export type EquipmentCategoryUpdate = Database["public"]["Tables"]["equipment_categories"]["Update"];
+
+export type EquipmentRow = Database["public"]["Tables"]["equipment"]["Row"];
+export type EquipmentInsert = Database["public"]["Tables"]["equipment"]["Insert"];
+export type EquipmentUpdate = Database["public"]["Tables"]["equipment"]["Update"];
