@@ -79,7 +79,7 @@ export const FEATURED_EQUIPMENT: EquipmentItem[] = [
     rate: {
       daily: 1250,
       weekly: 6250,
-      unit: "USD",
+      unit: "PHP",
     },
     availability: "Available",
     suitableProjects: ["Deep Foundation Trenching", "Civil Infrastructure", "Mass Earth Excavation"],
@@ -103,7 +103,7 @@ export const FEATURED_EQUIPMENT: EquipmentItem[] = [
     rate: {
       daily: 1100,
       weekly: 5500,
-      unit: "USD",
+      unit: "PHP",
     },
     availability: "Available",
     suitableProjects: ["Quarry Operations", "Aggregate Hauling", "Bulk Loading Facilities"],
@@ -127,7 +127,7 @@ export const FEATURED_EQUIPMENT: EquipmentItem[] = [
     rate: {
       daily: 2200,
       weekly: 11000,
-      unit: "USD",
+      unit: "PHP",
     },
     availability: "Available",
     suitableProjects: ["Mine Reclamation", "Mass Land Clearing", "Highway Grade Construction"],
@@ -151,7 +151,7 @@ export const FEATURED_EQUIPMENT: EquipmentItem[] = [
     rate: {
       daily: 650,
       weekly: 3250,
-      unit: "USD",
+      unit: "PHP",
     },
     availability: "Available",
     suitableProjects: ["Utility Line Installation", "Urban Infrastructure", "Site Prep & Backfilling"],
@@ -175,7 +175,7 @@ export const FEATURED_EQUIPMENT: EquipmentItem[] = [
     rate: {
       daily: 2400,
       weekly: 12000,
-      unit: "USD",
+      unit: "PHP",
     },
     availability: "Reserved",
     suitableProjects: ["Steel Erection", "Industrial Plant Assembly", "Heavy Modular Hoisting"],
@@ -199,7 +199,7 @@ export const FEATURED_EQUIPMENT: EquipmentItem[] = [
     rate: {
       daily: 580,
       weekly: 2900,
-      unit: "USD",
+      unit: "PHP",
     },
     availability: "Available",
     suitableProjects: ["Highway Sub-base Compaction", "Commercial Pad Prep", "Runway Subgrade"],

@@ -11,6 +11,7 @@ import {
 } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { HardHat, Truck, Layers, AlertCircle } from "lucide-react";
+import { formatCurrency } from "@/lib/utils";
 
 /**
  * Status badge helper matching the rental operational lifecycle.
@@ -187,10 +188,7 @@ export default async function EquipmentManagementPage() {
               <TableBody>
                 {equipmentList.map((item) => {
                   const categoryName = categoryMap.get(item.category_id) || "Uncategorized";
-                  const formattedDailyRate = new Intl.NumberFormat("en-US", {
-                    style: "currency",
-                    currency: "USD",
-                  }).format(item.daily_rate);
+                  const formattedDailyRate = formatCurrency(item.daily_rate);
 
                   return (
                     <TableRow key={item.id}>

@@ -14,6 +14,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { EquipmentItem } from "./types";
+import { formatCurrency } from "@/lib/utils";
 
 interface EquipmentDetailsModalProps {
   equipment: EquipmentItem | null;
@@ -130,7 +131,7 @@ export function EquipmentDetailsModal({
                 <span className="text-xs font-medium text-muted-foreground">Daily Commercial Rate</span>
                 <div className="flex items-baseline gap-1 mt-0.5">
                   <span className="text-2xl font-extrabold text-foreground">
-                    ${equipment.rate.daily.toLocaleString()}
+                    {formatCurrency(equipment.rate.daily)}
                   </span>
                   <span className="text-xs text-muted-foreground">/ operational day</span>
                 </div>
@@ -139,7 +140,7 @@ export function EquipmentDetailsModal({
                 <span className="text-xs font-medium text-muted-foreground">Weekly Rate (Discounted)</span>
                 <div className="flex items-baseline gap-1 mt-0.5 sm:justify-end">
                   <span className="text-lg font-bold text-foreground">
-                    ${equipment.rate.weekly.toLocaleString()}
+                    {formatCurrency(equipment.rate.weekly)}
                   </span>
                   <span className="text-xs text-muted-foreground">/ 5-day week</span>
                 </div>

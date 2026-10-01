@@ -9,6 +9,7 @@ import { Badge } from "@/components/ui/badge";
 import { FEATURED_EQUIPMENT } from "./mock-data";
 import { EquipmentItem } from "./types";
 import { EquipmentDetailsModal } from "./equipment-details-modal";
+import { formatCurrency } from "@/lib/utils";
 
 const filterTabs = [
   { id: "all", label: "All Equipment" },
@@ -147,7 +148,7 @@ export function FeaturedEquipment() {
                       </span>
                       <div className="flex items-baseline gap-1 mt-0.5">
                         <span className="text-xl font-extrabold text-foreground">
-                          ${item.rate.daily.toLocaleString()}
+                          {formatCurrency(item.rate.daily)}
                         </span>
                         <span className="text-xs text-muted-foreground">/ day</span>
                       </div>

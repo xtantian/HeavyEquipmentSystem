@@ -98,10 +98,10 @@ COMMENT ON COLUMN public.equipment.status IS
   'Operational status: available | reserved | maintenance | inactive.';
 
 COMMENT ON COLUMN public.equipment.daily_rate IS
-  'Standard 24-hour hire rate in USD (fixed precision).';
+  'Standard 24-hour hire rate in PHP (fixed precision).';
 
 COMMENT ON COLUMN public.equipment.weekly_rate IS
-  'Discounted 7-day hire rate in USD (fixed precision).';
+  'Discounted 7-day hire rate in PHP (fixed precision).';
 
 COMMENT ON COLUMN public.equipment.specs IS
   'Structured technical specifications list: [{ label: string, value: string }].';
