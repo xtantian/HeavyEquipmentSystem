@@ -248,7 +248,7 @@ export const WHY_CHOOSE_BENEFITS: BenefitItem[] = [
     title: "Transparent Pricing Breakdown",
     description: "Clear daily, weekly, and monthly rates with upfront transport estimates, fuel guidelines, and security deposit rules without unexpected fees.",
     tag: "Fair Rates",
-    iconName: "DollarSign",
+    iconName: "Banknote",
   },
   {
     title: "Documented Availability",

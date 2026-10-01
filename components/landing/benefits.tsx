@@ -1,7 +1,7 @@
 import { WHY_CHOOSE_BENEFITS } from "./mock-data";
 import {
   FileText,
-  DollarSign,
+  Banknote,
   Clock,
   ShieldCheck,
   Truck,
@@ -13,7 +13,8 @@ import { Badge } from "@/components/ui/badge";
 
 const benefitIcons: Record<string, React.ComponentType<{ className?: string }>> = {
   FileText: FileText,
-  DollarSign: DollarSign,
+  Banknote: Banknote,
+  DollarSign: Banknote,
   Clock: Clock,
   ShieldCheck: ShieldCheck,
   Truck: Truck,
