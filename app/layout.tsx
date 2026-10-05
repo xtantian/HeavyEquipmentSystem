@@ -17,8 +17,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Heavy Equipment Rental System",
-  description: "Find and rent heavy equipment with a clear, modern rental platform.",
+  title: "Rent It | Multi-Category Rental Marketplace",
+  description: "Find and rent heavy equipment, vehicles, boats, tech, and gear with transparent pricing and live availability.",
 };
 
 export default function RootLayout({

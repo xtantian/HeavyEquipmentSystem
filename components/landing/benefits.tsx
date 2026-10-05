@@ -28,13 +28,13 @@ export function Benefits() {
         {/* Section Header */}
         <div className="max-w-2xl">
           <Badge variant="outline" className="mb-2 font-medium tracking-wide uppercase text-xs">
-            Commercial Advantage
+            Marketplace Benefits
           </Badge>
           <h2 className="font-heading text-2xl font-bold tracking-tight text-foreground sm:text-3xl lg:text-4xl">
-            Why Choose the Platform
+            Why Choose Rent It
           </h2>
           <p className="mt-3 text-base text-muted-foreground">
-            Built to provide project estimators, equipment coordinators, and site superintendents with operational transparency and dependable machine dispatch.
+            Built to provide renters and owners with transparent pricing, verified item specifications, and dependable scheduling certainty.
           </p>
         </div>
 

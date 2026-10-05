@@ -12,27 +12,27 @@ export function FinalCta() {
         <div className="mx-auto max-w-3xl text-center">
           <div className="inline-flex items-center gap-2 rounded-full border border-zinc-800 bg-zinc-900/80 px-3.5 py-1 text-xs font-semibold text-zinc-300 backdrop-blur-sm">
             <HardHat className="h-3.5 w-3.5 text-amber-400" />
-            <span>Heavy Equipment Fleet Availability</span>
+            <span>Multi-Category Rentals Available</span>
           </div>
 
           <h2 className="mt-6 font-heading text-3xl font-extrabold tracking-tight text-white sm:text-4xl lg:text-5xl">
-            Ready to Get the Equipment You Need?
+            Ready to Find the Rental You Need?
           </h2>
 
           <p className="mt-4 text-base sm:text-lg text-zinc-400 leading-relaxed max-w-2xl mx-auto">
-            Browse available equipment, check technical specifications, and start your rental request with transparent commercial rates.
+            Browse available listings, check real-time availability, and start your rental request with transparent rates.
           </p>
 
           <div className="mt-8 flex flex-wrap items-center justify-center gap-3 sm:gap-4">
-            <a href="#equipment">
+            <Link href="/listings">
               <Button
                 size="lg"
                 className="h-12 px-7 text-base font-semibold shadow-lg shadow-primary/25 hover:shadow-primary/40 transition-all"
               >
-                Browse Equipment
+                Browse Listings
                 <ArrowRight className="ml-2 h-4 w-4" aria-hidden="true" />
               </Button>
-            </a>
+            </Link>
 
             <Link href="/sign-up">
               <Button
@@ -47,8 +47,8 @@ export function FinalCta() {
 
           <div className="mt-8 flex items-center justify-center gap-6 text-xs text-zinc-500">
             <span>• No credit card required to explore</span>
-            <span>• Verified commercial equipment</span>
-            <span>• Site delivery available</span>
+            <span>• Verified items & owners</span>
+            <span>• Flexible local pickup & delivery</span>
           </div>
         </div>
       </div>

@@ -302,6 +302,237 @@ export interface Database {
         };
         Relationships: [];
       };
+
+      /**
+       * categories
+       * Multi-category marketplace taxonomy (heavy equipment, cars, boats, etc.)
+       */
+      categories: {
+        Row: {
+          id: string;
+          name: string;
+          slug: string;
+          icon: string | null;
+          description: string | null;
+          attribute_schema: Json;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          name: string;
+          slug: string;
+          icon?: string | null;
+          description?: string | null;
+          attribute_schema?: Json;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          id?: string;
+          name?: string;
+          slug?: string;
+          icon?: string | null;
+          description?: string | null;
+          attribute_schema?: Json;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Relationships: [];
+      };
+
+      /**
+       * listings
+       * Multi-category rental marketplace inventory items
+       */
+      listings: {
+        Row: {
+          id: string;
+          owner_id: string;
+          category_id: string;
+          title: string;
+          description: string;
+          price_per_day: number;
+          images: string[];
+          location: string;
+          attributes: Json;
+          status: ListingStatus;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          owner_id: string;
+          category_id: string;
+          title: string;
+          description: string;
+          price_per_day: number;
+          images?: string[];
+          location: string;
+          attributes?: Json;
+          status?: ListingStatus;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          id?: string;
+          owner_id?: string;
+          category_id?: string;
+          title?: string;
+          description?: string;
+          price_per_day?: number;
+          images?: string[];
+          location?: string;
+          attributes?: Json;
+          status?: ListingStatus;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "listings_category_id_fkey";
+            columns: ["category_id"];
+            isOneToOne: false;
+            referencedRelation: "categories";
+            referencedColumns: ["id"];
+          }
+        ];
+      };
+
+      /**
+       * bookings
+       * Bookings with no-overlap constraint across rental duration
+       */
+      bookings: {
+        Row: {
+          id: string;
+          listing_id: string;
+          renter_id: string;
+          start_date: string;
+          end_date: string;
+          total_price: number;
+          status: BookingStatus;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          listing_id: string;
+          renter_id: string;
+          start_date: string;
+          end_date: string;
+          total_price: number;
+          status?: BookingStatus;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          id?: string;
+          listing_id?: string;
+          renter_id?: string;
+          start_date?: string;
+          end_date?: string;
+          total_price?: number;
+          status?: BookingStatus;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "bookings_listing_id_fkey";
+            columns: ["listing_id"];
+            isOneToOne: false;
+            referencedRelation: "listings";
+            referencedColumns: ["id"];
+          }
+        ];
+      };
+
+      /**
+       * reviews
+       * Reviews and ratings left for listings/bookings
+       */
+      reviews: {
+        Row: {
+          id: string;
+          listing_id: string;
+          booking_id: string | null;
+          reviewer_id: string;
+          rating: number;
+          comment: string | null;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          listing_id: string;
+          booking_id?: string | null;
+          reviewer_id: string;
+          rating: number;
+          comment?: string | null;
+          created_at?: string;
+        };
+        Update: {
+          id?: string;
+          listing_id?: string;
+          booking_id?: string | null;
+          reviewer_id?: string;
+          rating?: number;
+          comment?: string | null;
+          created_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "reviews_listing_id_fkey";
+            columns: ["listing_id"];
+            isOneToOne: false;
+            referencedRelation: "listings";
+            referencedColumns: ["id"];
+          }
+        ];
+      };
+
+      /**
+       * listing_images
+       * Gallery images for marketplace listings
+       */
+      listing_images: {
+        Row: {
+          id: string;
+          listing_id: string;
+          image_url: string;
+          url?: string;
+          is_primary: boolean;
+          sort_order: number;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          listing_id: string;
+          image_url: string;
+          url?: string;
+          is_primary?: boolean;
+          sort_order?: number;
+          created_at?: string;
+        };
+        Update: {
+          id?: string;
+          listing_id?: string;
+          image_url?: string;
+          url?: string;
+          is_primary?: boolean;
+          sort_order?: number;
+          created_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "listing_images_listing_id_fkey";
+            columns: ["listing_id"];
+            isOneToOne: false;
+            referencedRelation: "listings";
+            referencedColumns: ["id"];
+          }
+        ];
+      };
     };
     Views: {
       quotes: {
@@ -322,6 +553,25 @@ export interface Database {
   };
 }
 
+export type BookingStatus =
+  | "pending"
+  | "accepted"
+  | "paid"
+  | "active"
+  | "returned"
+  | "completed"
+  | "cancelled";
+
+export type ListingStatus = "available" | "rented" | "maintenance" | "inactive" | "pending_review";
+
+export interface AttributeFieldSchema {
+  key: string;
+  label: string;
+  type: "text" | "number" | "select" | "boolean";
+  options?: string[];
+  required?: boolean;
+}
+
 /**
  * Convenience Type Aliases for Application Code
  */
@@ -340,3 +590,23 @@ export type RentalRequestUpdate = Database["public"]["Tables"]["rental_requests"
 export type RentalInquiryRow = Database["public"]["Tables"]["rental_inquiries"]["Row"];
 export type RentalInquiryInsert = Database["public"]["Tables"]["rental_inquiries"]["Insert"];
 export type RentalInquiryUpdate = Database["public"]["Tables"]["rental_inquiries"]["Update"];
+
+export type CategoryRow = Database["public"]["Tables"]["categories"]["Row"];
+export type CategoryInsert = Database["public"]["Tables"]["categories"]["Insert"];
+export type CategoryUpdate = Database["public"]["Tables"]["categories"]["Update"];
+
+export type ListingRow = Database["public"]["Tables"]["listings"]["Row"];
+export type ListingInsert = Database["public"]["Tables"]["listings"]["Insert"];
+export type ListingUpdate = Database["public"]["Tables"]["listings"]["Update"];
+
+export type BookingRow = Database["public"]["Tables"]["bookings"]["Row"];
+export type BookingInsert = Database["public"]["Tables"]["bookings"]["Insert"];
+export type BookingUpdate = Database["public"]["Tables"]["bookings"]["Update"];
+
+export type ReviewRow = Database["public"]["Tables"]["reviews"]["Row"];
+export type ReviewInsert = Database["public"]["Tables"]["reviews"]["Insert"];
+export type ReviewUpdate = Database["public"]["Tables"]["reviews"]["Update"];
+
+export type ListingImageRow = Database["public"]["Tables"]["listing_images"]["Row"];
+export type ListingImageInsert = Database["public"]["Tables"]["listing_images"]["Insert"];
+export type ListingImageUpdate = Database["public"]["Tables"]["listing_images"]["Update"];

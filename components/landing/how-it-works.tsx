@@ -23,7 +23,7 @@ export function HowItWorks() {
             How It Works
           </h2>
           <p className="mt-3 text-base text-muted-foreground">
-            A structured, 4-step process designed for commercial civil contractors and project managers.
+            A seamless, 4-step rental process designed for verified renters and owners across all categories.
           </p>
         </div>
 

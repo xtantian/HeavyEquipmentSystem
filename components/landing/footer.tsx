@@ -19,59 +19,54 @@ export function Footer() {
               </div>
               <div className="flex flex-col">
                 <span className="font-heading text-base font-bold text-foreground">
-                  Heavy Equipment
+                  Rent It
                 </span>
                 <span className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
-                  Rental System
+                  Rental Marketplace
                 </span>
               </div>
             </Link>
 
             <p className="mt-4 max-w-sm text-xs leading-relaxed text-muted-foreground">
-              A modern commercial equipment rental platform providing civil contractors and project superintendents with reliable machinery discovery, verified specifications, and organized rental requests.
+              A modern multi-category rental marketplace connecting verified owners with renters for heavy equipment, vehicles, boats, tech, and production gear.
             </p>
 
             <div className="mt-5 flex items-center gap-2 text-xs text-muted-foreground">
               <Shield className="h-4 w-4 text-primary shrink-0" />
-              <span>Commercial Fleet Asset Management System</span>
+              <span>Verified Rentals & Secure Booking Protection</span>
             </div>
           </div>
 
           {/* Column 1: Fleet Categories */}
           <div>
             <h4 className="text-xs font-semibold uppercase tracking-wider text-foreground">
-              Equipment Fleet
+              Rental Categories
             </h4>
             <ul className="mt-3 space-y-2 text-xs text-muted-foreground">
               <li>
-                <a href="#equipment" className="hover:text-foreground transition-colors">
-                  Hydraulic Excavators
-                </a>
+                <Link href="/listings?category=heavy-equipment" className="hover:text-foreground transition-colors">
+                  Heavy Equipment
+                </Link>
               </li>
               <li>
-                <a href="#equipment" className="hover:text-foreground transition-colors">
-                  Wheel Loaders
-                </a>
+                <Link href="/listings?category=cars" className="hover:text-foreground transition-colors">
+                  Cars & Trucks
+                </Link>
               </li>
               <li>
-                <a href="#equipment" className="hover:text-foreground transition-colors">
-                  Track Bulldozers
-                </a>
+                <Link href="/listings?category=boats" className="hover:text-foreground transition-colors">
+                  Boats & Marine
+                </Link>
               </li>
               <li>
-                <a href="#equipment" className="hover:text-foreground transition-colors">
-                  Backhoe Loaders
-                </a>
+                <Link href="/listings?category=generators" className="hover:text-foreground transition-colors">
+                  Generators & Power
+                </Link>
               </li>
               <li>
-                <a href="#equipment" className="hover:text-foreground transition-colors">
-                  Rough-Terrain Cranes
-                </a>
-              </li>
-              <li>
-                <a href="#equipment" className="hover:text-foreground transition-colors">
-                  Vibratory Road Rollers
-                </a>
+                <Link href="/listings?category=cameras" className="hover:text-foreground transition-colors">
+                  Cameras & Production
+                </Link>
               </li>
             </ul>
           </div>
@@ -89,44 +84,39 @@ export function Footer() {
               </li>
               <li>
                 <a href="#categories" className="hover:text-foreground transition-colors">
-                  Fleet Classification
+                  Categories
                 </a>
               </li>
               <li>
-                <a href="#benefits" className="hover:text-foreground transition-colors">
-                  Why Choose Us
-                </a>
+                <Link href="/listings" className="hover:text-foreground transition-colors">
+                  Browse Listings
+                </Link>
               </li>
               <li>
-                <span className="text-muted-foreground/60 cursor-not-allowed">
-                  Inspection Protocols (Demo)
-                </span>
-              </li>
-              <li>
-                <span className="text-muted-foreground/60 cursor-not-allowed">
-                  Contractor Verification (Demo)
-                </span>
+                <Link href="/listings/new" className="hover:text-foreground transition-colors">
+                  List Your Item
+                </Link>
               </li>
             </ul>
           </div>
 
-          {/* Column 3: Yard & Dispatch Info Placeholder */}
+          {/* Column 3: Dispatch Info */}
           <div>
             <h4 className="text-xs font-semibold uppercase tracking-wider text-foreground">
-              Dispatch & Yard
+              Support & Yard
             </h4>
             <ul className="mt-3 space-y-2.5 text-xs text-muted-foreground">
               <li className="flex items-start gap-2">
                 <MapPin className="h-4 w-4 shrink-0 text-primary mt-0.5" />
-                <span>Central Equipment Yard & Maintenance Facility</span>
+                <span>Central Equipment Yard & Dispatch Facility</span>
               </li>
               <li className="flex items-center gap-2">
                 <Phone className="h-4 w-4 shrink-0 text-primary" />
-                <span>(555) 019-2834 (Fleet Ops)</span>
+                <span>(555) 019-2834</span>
               </li>
               <li className="flex items-center gap-2">
                 <Mail className="h-4 w-4 shrink-0 text-primary" />
-                <span>dispatch@heavyequip-demo.com</span>
+                <span>support@rentit-marketplace.com</span>
               </li>
             </ul>
           </div>
@@ -135,17 +125,17 @@ export function Footer() {
         {/* Bottom bar */}
         <div className="mt-12 border-t border-border/60 pt-6 flex flex-col sm:flex-row items-center justify-between gap-4 text-xs text-muted-foreground">
           <p>
-            &copy; {currentYear} Heavy Equipment Rental System. All rights reserved.
+            &copy; {currentYear} Rent It Rental Marketplace. All rights reserved.
           </p>
           <div className="flex items-center gap-6">
             <span className="hover:text-foreground cursor-pointer transition-colors">
-              Rental Terms (Placeholder)
+              Rental Terms
             </span>
             <span className="hover:text-foreground cursor-pointer transition-colors">
-              Safety Compliance (Placeholder)
+              Safety Compliance
             </span>
             <span className="hover:text-foreground cursor-pointer transition-colors">
-              Privacy Policy (Placeholder)
+              Privacy Policy
             </span>
           </div>
         </div>

@@ -43,19 +43,19 @@ export function FeaturedEquipment() {
         <div className="flex flex-col md:flex-row md:items-end md:justify-between gap-4">
           <div className="max-w-2xl">
             <Badge variant="outline" className="mb-2 font-medium tracking-wide uppercase text-xs">
-              Commercial Fleet Catalog
+              Featured Fleet & Equipment
             </Badge>
             <h2 className="font-heading text-2xl font-bold tracking-tight text-foreground sm:text-3xl lg:text-4xl">
-              Featured Equipment
+              Featured Fleet Units
             </h2>
             <p className="mt-3 text-base text-muted-foreground">
-              Inspected, high-hour-certified civil engineering machinery ready for short-term and contract hire.
+              Verified, high-quality rental units ready for short-term and contract hire with transparent daily pricing.
             </p>
           </div>
 
           <div className="text-xs text-muted-foreground flex items-center gap-1.5 self-start md:self-end">
             <ShieldCheck className="h-4 w-4 text-primary shrink-0" />
-            <span>Pre-rental verified multi-point mechanical inspection</span>
+            <span>Pre-rental verified multi-point inspection</span>
           </div>
         </div>
 
