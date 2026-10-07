@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import Link from "next/link";
-import { UserButton, useAuth } from "@clerk/nextjs";
+import { UserButton, useAuth, useUser } from "@clerk/nextjs";
 import { HardHat, Menu, X, ArrowRight, ShieldCheck } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
@@ -15,6 +15,8 @@ const navLinks = [
 export function Navbar() {
   const [mobileMenuOpen, setMobileMenuOpen] = React.useState(false);
   const { isSignedIn } = useAuth();
+  const { user } = useUser();
+  const isAdmin = user?.publicMetadata?.role === "admin";
 
   // Close mobile menu on escape key
   React.useEffect(() => {
@@ -78,6 +80,13 @@ export function Navbar() {
 
           {isSignedIn ? (
             <div className="flex items-center gap-2">
+              {isAdmin && (
+                <Link href="/admin">
+                  <Button variant="ghost" size="sm" className="font-semibold text-primary">
+                    Admin Dashboard
+                  </Button>
+                </Link>
+              )}
               <Link href="/dashboard">
                 <Button variant="ghost" size="sm" className="font-medium">
                   Dashboard
@@ -165,15 +174,28 @@ export function Navbar() {
             </Link>
 
             {isSignedIn && (
-              <Link
-                href="/dashboard"
-                onClick={() => setMobileMenuOpen(false)}
-                className="block"
-              >
-                <Button variant="outline" className="w-full justify-center">
-                  Dashboard
-                </Button>
-              </Link>
+              <>
+                {isAdmin && (
+                  <Link
+                    href="/admin"
+                    onClick={() => setMobileMenuOpen(false)}
+                    className="block"
+                  >
+                    <Button variant="outline" className="w-full justify-center border-primary/40 text-primary font-semibold">
+                      Admin Dashboard
+                    </Button>
+                  </Link>
+                )}
+                <Link
+                  href="/dashboard"
+                  onClick={() => setMobileMenuOpen(false)}
+                  className="block"
+                >
+                  <Button variant="outline" className="w-full justify-center">
+                    Dashboard
+                  </Button>
+                </Link>
+              </>
             )}
 
             {!isSignedIn && (

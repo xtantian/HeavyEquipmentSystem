@@ -4,7 +4,6 @@ import * as React from "react";
 import { useSearchParams } from "next/navigation";
 import { useAuth, useUser } from "@clerk/nextjs";
 import {
-  HardHat,
   Truck,
   CheckCircle2,
   AlertCircle,
@@ -59,12 +58,42 @@ export function RentalInquiryFormContent({
   // Read equipment query param from URL (e.g. ?equipment=Excavator%20(Backhoe))
   const urlEquipment = searchParams?.get("equipment") || "";
 
-  // State
-  const [equipmentName, setEquipmentName] = React.useState<string>(
-    initialEquipment || urlEquipment || EQUIPMENT_OPTIONS[0]
+  // Helper to match equipment option
+  const targetParam = initialEquipment || urlEquipment;
+  const resolveTargetEquipment = (target: string) => {
+    if (!target) return EQUIPMENT_OPTIONS[0];
+    const matched = EQUIPMENT_OPTIONS.find(
+      (eq) =>
+        eq.toLowerCase() === target.toLowerCase() ||
+        eq.toLowerCase().includes(target.toLowerCase()) ||
+        target.toLowerCase().includes(eq.toLowerCase())
+    );
+    return matched || target;
+  };
+
+  const [prevTarget, setPrevTarget] = React.useState(targetParam);
+  const [equipmentName, setEquipmentName] = React.useState<string>(() =>
+    resolveTargetEquipment(targetParam)
   );
-  const [fullName, setFullName] = React.useState<string>("");
-  const [email, setEmail] = React.useState<string>("");
+
+  if (targetParam !== prevTarget) {
+    setPrevTarget(targetParam);
+    setEquipmentName(resolveTargetEquipment(targetParam));
+  }
+
+  // Pre-fill user details if logged in with Clerk
+  const userFullName = user?.fullName || user?.firstName || "";
+  const userEmail = user?.primaryEmailAddress?.emailAddress || "";
+  const [prevUserKey, setPrevUserKey] = React.useState(user?.id || "");
+  const [fullName, setFullName] = React.useState(userFullName);
+  const [email, setEmail] = React.useState(userEmail);
+
+  if (user && user.id !== prevUserKey) {
+    setPrevUserKey(user.id);
+    if (!fullName) setFullName(userFullName);
+    if (!email) setEmail(userEmail);
+  }
+
   const [phone, setPhone] = React.useState<string>("");
   const [projectLocation, setProjectLocation] = React.useState<string>("");
   const [startDate, setStartDate] = React.useState<string>("");
@@ -73,37 +102,6 @@ export function RentalInquiryFormContent({
   const [isSubmitting, setIsSubmitting] = React.useState<boolean>(false);
   const [errorMessage, setErrorMessage] = React.useState<string | null>(null);
   const [isSuccess, setIsSuccess] = React.useState<boolean>(false);
-
-  // Auto-populate when URL query param or initialEquipment changes
-  React.useEffect(() => {
-    const target = initialEquipment || urlEquipment;
-    if (target) {
-      // Find matching option (case-insensitive substring or exact match)
-      const matched = EQUIPMENT_OPTIONS.find(
-        (eq) =>
-          eq.toLowerCase() === target.toLowerCase() ||
-          eq.toLowerCase().includes(target.toLowerCase()) ||
-          target.toLowerCase().includes(eq.toLowerCase())
-      );
-      if (matched) {
-        setEquipmentName(matched);
-      } else {
-        setEquipmentName(target);
-      }
-    }
-  }, [urlEquipment, initialEquipment]);
-
-  // Pre-fill user details if logged in with Clerk
-  React.useEffect(() => {
-    if (user) {
-      if (!fullName) {
-        setFullName(user.fullName || user.firstName || "");
-      }
-      if (!email && user.primaryEmailAddress) {
-        setEmail(user.primaryEmailAddress.emailAddress);
-      }
-    }
-  }, [user, fullName, email]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();

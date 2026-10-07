@@ -61,6 +61,8 @@ export interface Database {
           last_name: string | null;
           avatar_url: string | null;
           role: UserRole;
+          status: UserAccountStatus;
+          phone?: string | null;
           created_at: string;
           updated_at: string;
         };
@@ -72,6 +74,8 @@ export interface Database {
           last_name?: string | null;
           avatar_url?: string | null;
           role?: UserRole;
+          status?: UserAccountStatus;
+          phone?: string | null;
           created_at?: string;
           updated_at?: string;
         };
@@ -83,6 +87,8 @@ export interface Database {
           last_name?: string | null;
           avatar_url?: string | null;
           role?: UserRole;
+          status?: UserAccountStatus;
+          phone?: string | null;
           created_at?: string;
           updated_at?: string;
         };
@@ -357,6 +363,9 @@ export interface Database {
           location: string;
           attributes: Json;
           status: ListingStatus;
+          is_reported?: boolean;
+          report_reason?: string | null;
+          deleted_at?: string | null;
           created_at: string;
           updated_at: string;
         };
@@ -371,6 +380,9 @@ export interface Database {
           location: string;
           attributes?: Json;
           status?: ListingStatus;
+          is_reported?: boolean;
+          report_reason?: string | null;
+          deleted_at?: string | null;
           created_at?: string;
           updated_at?: string;
         };
@@ -385,6 +397,9 @@ export interface Database {
           location?: string;
           attributes?: Json;
           status?: ListingStatus;
+          is_reported?: boolean;
+          report_reason?: string | null;
+          deleted_at?: string | null;
           created_at?: string;
           updated_at?: string;
         };
@@ -533,6 +548,83 @@ export interface Database {
           }
         ];
       };
+      listing_reports: {
+        Row: {
+          id: string;
+          listing_id: string;
+          reporter_id: string | null;
+          reporter_email: string | null;
+          reason: string;
+          details: string | null;
+          status: "pending" | "reviewed" | "dismissed" | "action_taken";
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          listing_id: string;
+          reporter_id?: string | null;
+          reporter_email?: string | null;
+          reason: string;
+          details?: string | null;
+          status?: "pending" | "reviewed" | "dismissed" | "action_taken";
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          id?: string;
+          listing_id?: string;
+          reporter_id?: string | null;
+          reporter_email?: string | null;
+          reason?: string;
+          details?: string | null;
+          status?: "pending" | "reviewed" | "dismissed" | "action_taken";
+          created_at?: string;
+          updated_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "listing_reports_listing_id_fkey";
+            columns: ["listing_id"];
+            isOneToOne: false;
+            referencedRelation: "listings";
+            referencedColumns: ["id"];
+          }
+        ];
+      };
+      admin_audit_logs: {
+        Row: {
+          id: string;
+          admin_id: string;
+          admin_email: string | null;
+          action: string;
+          target_type: string;
+          target_id: string;
+          details: Json;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          admin_id: string;
+          admin_email?: string | null;
+          action: string;
+          target_type: string;
+          target_id: string;
+          details?: Json;
+          created_at?: string;
+        };
+        Update: {
+          id?: string;
+          admin_id?: string;
+          admin_email?: string | null;
+          action?: string;
+          target_type?: string;
+          target_id?: string;
+          details?: Json;
+          created_at?: string;
+        };
+        Relationships: [];
+      };
     };
     Views: {
       quotes: {
@@ -562,7 +654,16 @@ export type BookingStatus =
   | "completed"
   | "cancelled";
 
-export type ListingStatus = "available" | "rented" | "maintenance" | "inactive" | "pending_review";
+export type ListingStatus =
+  | "available"
+  | "rented"
+  | "maintenance"
+  | "inactive"
+  | "pending_review"
+  | "restricted"
+  | "deleted";
+
+export type UserAccountStatus = "active" | "restricted" | "banned" | "deleted";
 
 export interface AttributeFieldSchema {
   key: string;

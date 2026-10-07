@@ -86,13 +86,13 @@ CREATE POLICY "rental_inquiries_insert_policy"
   TO public, anon, authenticated
   WITH CHECK (true);
 
--- Allow reading inquiries for staff, admins, and authenticated users
+-- Allow reading inquiries only for staff and admins
 DROP POLICY IF EXISTS "rental_inquiries_select_policy" ON public.rental_inquiries;
 CREATE POLICY "rental_inquiries_select_policy"
   ON public.rental_inquiries
   FOR SELECT
-  TO public, anon, authenticated
-  USING (true);
+  TO authenticated
+  USING (public.is_staff_or_admin());
 
 -- Allow staff and administrators to update or manage inquiries
 DROP POLICY IF EXISTS "rental_inquiries_update_policy" ON public.rental_inquiries;

@@ -19,14 +19,15 @@ import {
   Shield,
   Loader2,
   Image as ImageIcon,
+  Trash2,
 } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { formatCurrency } from "@/lib/utils";
+import { formatCurrency, calculateInclusiveRentalDays } from "@/lib/utils";
 import type { DashboardBookingItem } from "@/lib/supabase/marketplace";
 import type { MarketplaceListingItem } from "@/lib/marketplace/mock-listings";
-import { updateBookingStatusAction } from "@/app/dashboard/actions";
+import { updateBookingStatusAction, deleteUserListingAction } from "@/app/dashboard/actions";
 
 interface DashboardTabsProps {
   initialRentals: DashboardBookingItem[];
@@ -46,7 +47,7 @@ export function DashboardTabs({
   // State for optimistic updates
   const [rentals, setRentals] = React.useState<DashboardBookingItem[]>(initialRentals);
   const [incomingBookings, setIncomingBookings] = React.useState<DashboardBookingItem[]>(initialIncomingBookings);
-  const [listings] = React.useState<MarketplaceListingItem[]>(initialListings);
+  const [listings, setListings] = React.useState<MarketplaceListingItem[]>(initialListings);
 
   // Loading indicator map for action buttons
   const [loadingActions, setLoadingActions] = React.useState<Record<string, boolean>>({});
@@ -181,6 +182,26 @@ export function DashboardTabs({
       console.error("Decline request error:", err);
     } finally {
       setLoadingActions((prev) => ({ ...prev, [bookingId]: false }));
+    }
+  };
+
+  // Delete own listing action (from Owner tab)
+  const handleDeleteListing = async (listingId: string) => {
+    if (!confirm("Are you sure you want to delete this listing?")) return;
+
+    setLoadingActions((prev) => ({ ...prev, [listingId]: true }));
+    try {
+      setListings((prev) => prev.filter((item) => item.id !== listingId));
+      const res = await deleteUserListingAction(listingId);
+      if (res.error) {
+        showNotification(res.error, "info");
+      } else {
+        showNotification("Listing deleted successfully.", "success");
+      }
+    } catch (err) {
+      console.error("Delete listing error:", err);
+    } finally {
+      setLoadingActions((prev) => ({ ...prev, [listingId]: false }));
     }
   };
 
@@ -332,6 +353,10 @@ export function DashboardTabs({
                               <span className="font-medium text-foreground">
                                 {format(parseISO(booking.start_date), "MMM dd, yyyy")} → {format(parseISO(booking.end_date), "MMM dd, yyyy")}
                               </span>
+                              <span className="text-[11px] text-muted-foreground">
+                                ({calculateInclusiveRentalDays(booking.start_date, booking.end_date)}{" "}
+                                {calculateInclusiveRentalDays(booking.start_date, booking.end_date) === 1 ? "day" : "days"})
+                              </span>
                             </div>
 
                             <div className="font-semibold text-foreground">
@@ -473,6 +498,10 @@ export function DashboardTabs({
                                 <Calendar className="h-3.5 w-3.5 text-muted-foreground" />
                                 <span className="font-medium text-foreground">
                                   {format(parseISO(request.start_date), "MMM dd, yyyy")} → {format(parseISO(request.end_date), "MMM dd, yyyy")}
+                                </span>
+                                <span className="text-[11px] text-muted-foreground">
+                                  ({calculateInclusiveRentalDays(request.start_date, request.end_date)}{" "}
+                                  {calculateInclusiveRentalDays(request.start_date, request.end_date) === 1 ? "day" : "days"})
                                 </span>
                               </div>
 
@@ -629,12 +658,24 @@ export function DashboardTabs({
                           {formatCurrency(item.price_per_day)} <span className="text-xs font-normal text-muted-foreground">/ day</span>
                         </span>
 
-                        <Link href={`/listings/${item.id}`}>
-                          <Button variant="ghost" size="sm" className="h-8 text-xs font-semibold">
-                            View
-                            <ExternalLink className="ml-1 h-3 w-3" />
+                        <div className="flex items-center gap-1">
+                          <Link href={`/listings/${item.id}`}>
+                            <Button variant="ghost" size="sm" className="h-8 text-xs font-semibold">
+                              View
+                              <ExternalLink className="ml-1 h-3 w-3" />
+                            </Button>
+                          </Link>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            disabled={Boolean(loadingActions[item.id])}
+                            onClick={() => handleDeleteListing(item.id)}
+                            className="h-8 text-xs font-semibold text-destructive hover:bg-destructive/10 hover:text-destructive cursor-pointer"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
                           </Button>
-                        </Link>
+                        </div>
                       </div>
                     </Card>
                   );

@@ -24,6 +24,8 @@ export async function getMarketplaceCategories(): Promise<CategoryRow[]> {
       .select("*")
       .order("name", { ascending: true });
 
+    console.log("[select categories]", { count: data?.length, error });
+
     if (!error && data && data.length > 0) {
       return data;
     }
@@ -44,17 +46,28 @@ export async function getMarketplaceCategories(): Promise<CategoryRow[]> {
   }));
 }
 
+export const RESERVATION_BLOCKING_STATUSES = [
+  "pending",
+  "accepted",
+  "paid",
+  "active",
+] as const;
+
+export type ReservationBlockingStatus = (typeof RESERVATION_BLOCKING_STATUSES)[number];
+
 export interface ListingsQueryOptions {
   category?: string;
   q?: string;
   start?: string;
   end?: string;
+  min?: string | number;
+  max?: string | number;
 }
 
 export async function getMarketplaceListings(
   options: ListingsQueryOptions = {}
 ): Promise<MarketplaceListingItem[]> {
-  const { category, q, start, end } = options;
+  const { category, q, start, end, min, max } = options;
 
   try {
     const supabase = getPublicClient() || (await createSupabaseServerClient());
@@ -79,7 +92,7 @@ export async function getMarketplaceListings(
       let bookingsQuery = supabase
         .from("bookings")
         .select("listing_id")
-        .in("status", ["accepted", "paid", "active"]);
+        .in("status", [...RESERVATION_BLOCKING_STATUSES]);
 
       if (start && end) {
         bookingsQuery = bookingsQuery.lte("start_date", end).gte("end_date", start);
@@ -95,7 +108,7 @@ export async function getMarketplaceListings(
       }
     }
 
-    // 3. Query listings with relations
+    // 3. Query listings with relations (including available and newly submitted pending_review)
     let query = supabase
       .from("listings")
       .select(`
@@ -103,14 +116,29 @@ export async function getMarketplaceListings(
         category:categories(*),
         listing_images(*)
       `)
-      .eq("status", "available");
+      .in("status", ["available", "pending_review"]);
 
     if (categoryId) {
       query = query.eq("category_id", categoryId);
     }
 
     if (q && q.trim().length > 0) {
-      query = query.ilike("title", `%${q.trim()}%`);
+      const term = `%${q.trim()}%`;
+      query = query.or(`title.ilike.${term},description.ilike.${term},location.ilike.${term}`);
+    }
+
+    if (min !== undefined && min !== null && min !== "") {
+      const minVal = Number(min);
+      if (!isNaN(minVal)) {
+        query = query.gte("price_per_day", minVal);
+      }
+    }
+
+    if (max !== undefined && max !== null && max !== "") {
+      const maxVal = Number(max);
+      if (!isNaN(maxVal)) {
+        query = query.lte("price_per_day", maxVal);
+      }
     }
 
     if (bookedListingIds.length > 0) {
@@ -118,6 +146,8 @@ export async function getMarketplaceListings(
     }
 
     const { data, error } = await query.order("created_at", { ascending: false });
+
+    console.log("[select listings]", { data, error });
 
     if (!error && data && data.length > 0) {
       return data as unknown as MarketplaceListingItem[];
@@ -128,6 +158,31 @@ export async function getMarketplaceListings(
 
   // Graceful fallback to mock listings
   return filterMockListings(options);
+}
+
+export async function getAllListingsForAdmin(): Promise<MarketplaceListingItem[]> {
+  try {
+    const supabase = await createSupabaseServerClient();
+    const { data, error } = await supabase
+      .from("listings")
+      .select(`
+        *,
+        category:categories(*),
+        listing_images(*)
+      `)
+      .order("created_at", { ascending: false });
+
+    if (!error && data) {
+      return data as unknown as MarketplaceListingItem[];
+    }
+    if (error) {
+      console.error("[supabase/marketplace] Database error fetching admin listings:", error.message);
+    }
+  } catch (err) {
+    console.error("[supabase/marketplace] Error fetching all listings for admin:", err);
+  }
+
+  return [];
 }
 
 export async function getMarketplaceListingById(
@@ -173,6 +228,20 @@ function filterMockListings(options: ListingsQueryOptions): MarketplaceListingIt
     );
   }
 
+  if (options.min !== undefined && options.min !== null && options.min !== "") {
+    const minVal = Number(options.min);
+    if (!isNaN(minVal)) {
+      results = results.filter((item) => item.price_per_day >= minVal);
+    }
+  }
+
+  if (options.max !== undefined && options.max !== null && options.max !== "") {
+    const maxVal = Number(options.max);
+    if (!isNaN(maxVal)) {
+      results = results.filter((item) => item.price_per_day <= maxVal);
+    }
+  }
+
   return results;
 }
 
@@ -191,24 +260,34 @@ export async function getBookedRangesForListing(
       .from("bookings")
       .select("start_date, end_date, status")
       .eq("listing_id", listingId)
-      .in("status", ["accepted", "paid", "active"]);
+      .in("status", [...RESERVATION_BLOCKING_STATUSES]);
 
-    if (!error && data && data.length > 0) {
+    if (!error && data) {
       return data;
+    }
+    if (error) {
+      console.warn(`[supabase/marketplace] Error fetching bookings for ${listingId}:`, error.message);
     }
   } catch (err) {
     console.warn(`[supabase/marketplace] Error fetching bookings for ${listingId}:`, err);
   }
 
-  return MOCK_BOOKINGS
-    .filter(
-      (b) => b.listing_id === listingId && ["accepted", "paid", "active"].includes(b.status)
-    )
-    .map((b) => ({
-      start_date: b.start_date,
-      end_date: b.end_date,
-      status: b.status,
-    }));
+  // Only check mock bookings for static demo listings if database is unreachable
+  if (listingId.startsWith("lst-")) {
+    return MOCK_BOOKINGS
+      .filter(
+        (b) =>
+          b.listing_id === listingId &&
+          (RESERVATION_BLOCKING_STATUSES as readonly string[]).includes(b.status)
+      )
+      .map((b) => ({
+        start_date: b.start_date,
+        end_date: b.end_date,
+        status: b.status,
+      }));
+  }
+
+  return [];
 }
 
 export interface DashboardBookingItem {
@@ -225,7 +304,7 @@ export interface DashboardBookingItem {
 
 export async function getUserRentals(userId: string): Promise<DashboardBookingItem[]> {
   try {
-    const supabase = getPublicClient() || (await createSupabaseServerClient());
+    const supabase = await createSupabaseServerClient();
     const { data, error } = await supabase
       .from("bookings")
       .select(`
@@ -239,47 +318,17 @@ export async function getUserRentals(userId: string): Promise<DashboardBookingIt
       .eq("renter_id", userId)
       .order("created_at", { ascending: false });
 
-    if (!error && data && data.length > 0) {
+    if (!error && data) {
       return data as unknown as DashboardBookingItem[];
     }
+    if (error) {
+      console.warn("[supabase] Error fetching user rentals:", error.message);
+    }
   } catch (err) {
-    console.warn("[supabase] Error fetching user rentals:", err);
+    console.warn("[supabase] Exception fetching user rentals:", err);
   }
 
-  // Check MOCK_BOOKINGS for this user
-  const userBookings = MOCK_BOOKINGS.filter((b) => b.renter_id === userId);
-  if (userBookings.length > 0) {
-    return userBookings.map((b) => ({
-      ...b,
-      listing: MOCK_LISTINGS.find((l) => l.id === b.listing_id) || null,
-    }));
-  }
-
-  // Sample initial rentals for demonstration
-  return [
-    {
-      id: "demo-bk-1",
-      listing_id: "lst-car-tesla-3",
-      renter_id: userId,
-      start_date: "2026-10-12",
-      end_date: "2026-10-16",
-      total_price: 340,
-      status: "pending" as const,
-      created_at: new Date().toISOString(),
-      listing: MOCK_LISTINGS.find((l) => l.id === "lst-car-tesla-3") || null,
-    },
-    {
-      id: "demo-bk-2",
-      listing_id: "lst-cam-sony-fx3",
-      renter_id: userId,
-      start_date: "2026-10-20",
-      end_date: "2026-10-23",
-      total_price: 420,
-      status: "accepted" as const,
-      created_at: new Date().toISOString(),
-      listing: MOCK_LISTINGS.find((l) => l.id === "lst-cam-sony-fx3") || null,
-    },
-  ];
+  return [];
 }
 
 export async function getUserListingsAndIncoming(userId: string): Promise<{
@@ -290,9 +339,9 @@ export async function getUserListingsAndIncoming(userId: string): Promise<{
   let incomingBookings: DashboardBookingItem[] = [];
 
   try {
-    const supabase = getPublicClient() || (await createSupabaseServerClient());
+    const supabase = await createSupabaseServerClient();
 
-    // 1. Fetch user's listings
+    // 1. Fetch user's listings (excluding soft-deleted)
     const { data: listData, error: listError } = await supabase
       .from("listings")
       .select(`
@@ -301,10 +350,13 @@ export async function getUserListingsAndIncoming(userId: string): Promise<{
         listing_images(*)
       `)
       .eq("owner_id", userId)
+      .neq("status", "deleted")
       .order("created_at", { ascending: false });
 
     if (!listError && listData) {
       listings = listData as unknown as MarketplaceListingItem[];
+    } else if (listError) {
+      console.warn("[supabase] Error fetching user listings:", listError.message);
     }
 
     // 2. Fetch incoming bookings for these listings
@@ -325,46 +377,12 @@ export async function getUserListingsAndIncoming(userId: string): Promise<{
 
       if (!bkError && bkData) {
         incomingBookings = bkData as unknown as DashboardBookingItem[];
+      } else if (bkError) {
+        console.warn("[supabase] Error fetching incoming bookings:", bkError.message);
       }
     }
   } catch (err) {
     console.warn("[supabase] Error fetching user listings and incoming bookings:", err);
-  }
-
-  // Fallback for listings
-  if (listings.length === 0) {
-    const userMockListings = MOCK_LISTINGS.filter((l) => l.owner_id === userId);
-    if (userMockListings.length > 0) {
-      listings = userMockListings;
-    } else {
-      listings = [MOCK_LISTINGS[0], MOCK_LISTINGS[2]];
-    }
-  }
-
-  // Fallback for incoming bookings
-  if (incomingBookings.length === 0) {
-    const listingIds = new Set(listings.map((l) => l.id));
-    const matched = MOCK_BOOKINGS.filter((b) => listingIds.has(b.listing_id));
-    if (matched.length > 0) {
-      incomingBookings = matched.map((b) => ({
-        ...b,
-        listing: listings.find((l) => l.id === b.listing_id) || null,
-      }));
-    } else {
-      incomingBookings = [
-        {
-          id: "demo-incoming-1",
-          listing_id: listings[0]?.id || "lst-car-tesla-3",
-          renter_id: "user_client_4492",
-          start_date: "2026-10-18",
-          end_date: "2026-10-22",
-          total_price: 340,
-          status: "pending" as const,
-          created_at: new Date().toISOString(),
-          listing: listings[0] || null,
-        },
-      ];
-    }
   }
 
   return { listings, incomingBookings };

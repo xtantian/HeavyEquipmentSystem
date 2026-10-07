@@ -94,7 +94,6 @@ CREATE POLICY "rental_requests_select_policy"
   USING (
     (auth.jwt() ->> 'sub' IS NOT NULL AND user_id = (auth.jwt() ->> 'sub'))
     OR public.is_staff_or_admin()
-    OR user_id IS NULL
   );
 
 -- UPDATE Policy: Restricted to staff/manager/admin

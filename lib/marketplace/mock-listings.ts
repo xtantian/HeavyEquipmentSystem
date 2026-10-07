@@ -10,7 +10,7 @@ export const MOCK_LISTINGS: MarketplaceListingItem[] = [
   {
     id: "lst-car-tesla-3",
     owner_id: "user_owner_01",
-    category_id: "cat-cars",
+    category_id: "c0000000-0000-0000-0000-000000000002",
     title: "Tesla Model 3 Long Range AWD (2024)",
     description: "Dual motor all-wheel drive, premium audio, Autopilot, 340+ mile real-world range. Clean, fully charged on handover.",
     price_per_day: 85,
@@ -29,7 +29,7 @@ export const MOCK_LISTINGS: MarketplaceListingItem[] = [
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
     category: {
-      id: "cat-cars",
+      id: "c0000000-0000-0000-0000-000000000002",
       name: "Cars",
       slug: "cars",
       icon: "Car",
@@ -53,7 +53,7 @@ export const MOCK_LISTINGS: MarketplaceListingItem[] = [
   {
     id: "lst-car-ford-f150",
     owner_id: "user_owner_02",
-    category_id: "cat-cars",
+    category_id: "c0000000-0000-0000-0000-000000000002",
     title: "Ford F-150 Lightning Lariat 4x4",
     description: "All-electric full-size pickup with 9.6kW Pro Power Onboard generator capabilities, extended range battery and towing package.",
     price_per_day: 130,
@@ -72,7 +72,7 @@ export const MOCK_LISTINGS: MarketplaceListingItem[] = [
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
     category: {
-      id: "cat-cars",
+      id: "c0000000-0000-0000-0000-000000000002",
       name: "Cars",
       slug: "cars",
       icon: "Car",
@@ -98,7 +98,7 @@ export const MOCK_LISTINGS: MarketplaceListingItem[] = [
   {
     id: "lst-he-cat-320",
     owner_id: "user_owner_03",
-    category_id: "cat-heavy-equipment",
+    category_id: "c0000000-0000-0000-0000-000000000001",
     title: "Caterpillar 320 GC Hydraulic Excavator",
     description: "20.5-tonne crawler excavator optimized for high-volume trenching, site bulk earthworks and utility installation.",
     price_per_day: 450,
@@ -115,7 +115,7 @@ export const MOCK_LISTINGS: MarketplaceListingItem[] = [
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
     category: {
-      id: "cat-heavy-equipment",
+      id: "c0000000-0000-0000-0000-000000000001",
       name: "Heavy Equipment",
       slug: "heavy-equipment",
       icon: "HardHat",
@@ -139,7 +139,7 @@ export const MOCK_LISTINGS: MarketplaceListingItem[] = [
   {
     id: "lst-he-cat-d6",
     owner_id: "user_owner_03",
-    category_id: "cat-heavy-equipment",
+    category_id: "c0000000-0000-0000-0000-000000000001",
     title: "CAT D6T XL Track-Type Bulldozer",
     description: "Engineered for precision earth clearing, heavy site grading, and bulk leveling with VPAT blade and Cat Grade with 3D.",
     price_per_day: 520,
@@ -155,7 +155,7 @@ export const MOCK_LISTINGS: MarketplaceListingItem[] = [
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
     category: {
-      id: "cat-heavy-equipment",
+      id: "c0000000-0000-0000-0000-000000000001",
       name: "Heavy Equipment",
       slug: "heavy-equipment",
       icon: "HardHat",
@@ -181,7 +181,7 @@ export const MOCK_LISTINGS: MarketplaceListingItem[] = [
   {
     id: "lst-boat-sea-ray",
     owner_id: "user_owner_04",
-    category_id: "cat-boats",
+    category_id: "c0000000-0000-0000-0000-000000000005",
     title: "Sea Ray Sundancer 320 Sports Cruiser",
     description: "Twin MerCruiser 350HP engines, bow lounge, air-conditioned cabin, wet bar, and Garmin navigation. Perfect for harbor & offshore rentals.",
     price_per_day: 750,
@@ -198,7 +198,7 @@ export const MOCK_LISTINGS: MarketplaceListingItem[] = [
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
     category: {
-      id: "cat-boats",
+      id: "c0000000-0000-0000-0000-000000000005",
       name: "Boats",
       slug: "boats",
       icon: "Ship",
@@ -224,7 +224,7 @@ export const MOCK_LISTINGS: MarketplaceListingItem[] = [
   {
     id: "lst-gen-cummins-50",
     owner_id: "user_owner_05",
-    category_id: "cat-generators",
+    category_id: "c0000000-0000-0000-0000-000000000006",
     title: "Cummins 50 kVA Silent Diesel Generator Set",
     description: "Acoustically insulated canopy with 65 dBA noise level, auto-transfer switch compatible, continuous power rating with 24-hour base tank.",
     price_per_day: 160,
@@ -241,7 +241,7 @@ export const MOCK_LISTINGS: MarketplaceListingItem[] = [
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
     category: {
-      id: "cat-generators",
+      id: "c0000000-0000-0000-0000-000000000006",
       name: "Generators",
       slug: "generators",
       icon: "Zap",
@@ -267,7 +267,7 @@ export const MOCK_LISTINGS: MarketplaceListingItem[] = [
   {
     id: "lst-cam-sony-fx3",
     owner_id: "user_owner_06",
-    category_id: "cat-cameras",
+    category_id: "c0000000-0000-0000-0000-000000000007",
     title: "Sony FX3 Cinema Line Full-Frame Kit",
     description: "Includes cage, XLR top handle, 2x 160GB CFexpress Type A cards, 4x NP-FZ100 batteries, and Sony 24-70mm f/2.8 GM II lens.",
     price_per_day: 140,
@@ -284,7 +284,7 @@ export const MOCK_LISTINGS: MarketplaceListingItem[] = [
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
     category: {
-      id: "cat-cameras",
+      id: "c0000000-0000-0000-0000-000000000007",
       name: "Cameras",
       slug: "cameras",
       icon: "Camera",
@@ -310,7 +310,7 @@ export const MOCK_LISTINGS: MarketplaceListingItem[] = [
   {
     id: "lst-phone-iphone-16",
     owner_id: "user_owner_07",
-    category_id: "cat-phones",
+    category_id: "c0000000-0000-0000-0000-000000000008",
     title: "Apple iPhone 16 Pro Max 512GB (Titanium)",
     description: "Unlocked flagship device configured for international roaming and production shoots. Includes rugged MagSafe case and 4K ProRes capture kit.",
     price_per_day: 35,
@@ -327,7 +327,7 @@ export const MOCK_LISTINGS: MarketplaceListingItem[] = [
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
     category: {
-      id: "cat-phones",
+      id: "c0000000-0000-0000-0000-000000000008",
       name: "Phones",
       slug: "phones",
       icon: "Smartphone",
@@ -353,7 +353,7 @@ export const MOCK_LISTINGS: MarketplaceListingItem[] = [
   {
     id: "lst-bus-sprinter",
     owner_id: "user_owner_08",
-    category_id: "cat-buses",
+    category_id: "c0000000-0000-0000-0000-000000000003",
     title: "Mercedes-Benz Sprinter 15-Passenger Luxury Shuttle",
     description: "High-roof extended passenger van with reclining leather captain chairs, dual-zone AC, overhead luggage racks, and Wi-Fi hotspot.",
     price_per_day: 280,
@@ -370,7 +370,7 @@ export const MOCK_LISTINGS: MarketplaceListingItem[] = [
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
     category: {
-      id: "cat-buses",
+      id: "c0000000-0000-0000-0000-000000000003",
       name: "Buses",
       slug: "buses",
       icon: "Bus",
@@ -396,7 +396,7 @@ export const MOCK_LISTINGS: MarketplaceListingItem[] = [
   {
     id: "lst-moto-bmw-1250",
     owner_id: "user_owner_09",
-    category_id: "cat-motorcycles",
+    category_id: "c0000000-0000-0000-0000-000000000004",
     title: "BMW R 1250 GS Adventure Touring",
     description: "1254cc Boxer engine with ShiftCam, aluminum panniers, Dynamic ESA, riding modes Pro, and heated grips. Road-trip ready.",
     price_per_day: 110,
@@ -413,7 +413,7 @@ export const MOCK_LISTINGS: MarketplaceListingItem[] = [
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
     category: {
-      id: "cat-motorcycles",
+      id: "c0000000-0000-0000-0000-000000000004",
       name: "Motorcycles",
       slug: "motorcycles",
       icon: "Bike",

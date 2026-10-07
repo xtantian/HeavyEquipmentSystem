@@ -4,7 +4,6 @@ import * as React from "react";
 import Link from "next/link";
 import {
   format,
-  differenceInDays,
   addDays,
   startOfToday,
   parseISO,
@@ -27,7 +26,11 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Calendar } from "@/components/ui/calendar";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { formatCurrency } from "@/lib/utils";
+import {
+  formatCurrency,
+  calculateInclusiveRentalDays,
+  calculateRentalTotalPrice,
+} from "@/lib/utils";
 import { createBookingAction } from "@/app/listings/[id]/actions";
 
 interface BookedRangeItem {
@@ -50,7 +53,6 @@ export function RequestToBookCard({
   listingTitle,
   pricePerDay,
   depositAmount,
-  ownerId,
   bookedRanges = [],
 }: RequestToBookCardProps) {
   const today = React.useMemo(() => startOfToday(), []);
@@ -89,7 +91,7 @@ export function RequestToBookCard({
       // 1. Disable past dates
       if (isBefore(date, today)) return true;
 
-      // 2. Disable dates from bookings with status accepted/paid/active
+      // 2. Disable dates from bookings with reservation-holding status (pending, accepted, paid, active)
       return bookedRanges.some((range) => {
         const rangeStart = startOfDay(parseISO(range.start_date));
         const rangeEnd = endOfDay(parseISO(range.end_date));
@@ -99,15 +101,15 @@ export function RequestToBookCard({
     [today, bookedRanges]
   );
 
-  // Compute live duration & live price
+  // Compute live duration & live price using authoritative inclusive rental helper
   const durationDays = React.useMemo(() => {
-    if (!startDate || !endDate) return 0;
-    const diff = differenceInDays(endDate, startDate);
-    return Math.max(1, diff);
+    return calculateInclusiveRentalDays(startDate, endDate);
   }, [startDate, endDate]);
 
-  // Live price = days x price
-  const livePrice = durationDays * pricePerDay;
+  // Live price = inclusive days × price
+  const livePrice = React.useMemo(() => {
+    return calculateRentalTotalPrice(pricePerDay, startDate, endDate);
+  }, [pricePerDay, startDate, endDate]);
 
   // Check if chosen range contains any disabled/booked days
   const hasRangeConflict = React.useMemo(() => {

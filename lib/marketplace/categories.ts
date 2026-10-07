@@ -26,7 +26,7 @@ export interface MarketplaceCategoryDef {
 
 export const MARKETPLACE_CATEGORIES: MarketplaceCategoryDef[] = [
   {
-    id: "cat-heavy-equipment",
+    id: "c0000000-0000-0000-0000-000000000001",
     name: "Heavy Equipment",
     slug: "heavy-equipment",
     iconName: "HardHat",
@@ -46,7 +46,7 @@ export const MARKETPLACE_CATEGORIES: MarketplaceCategoryDef[] = [
     ],
   },
   {
-    id: "cat-cars",
+    id: "c0000000-0000-0000-0000-000000000002",
     name: "Cars",
     slug: "cars",
     iconName: "Car",
@@ -74,7 +74,7 @@ export const MARKETPLACE_CATEGORIES: MarketplaceCategoryDef[] = [
     ],
   },
   {
-    id: "cat-buses",
+    id: "c0000000-0000-0000-0000-000000000003",
     name: "Buses",
     slug: "buses",
     iconName: "Bus",
@@ -87,7 +87,7 @@ export const MARKETPLACE_CATEGORIES: MarketplaceCategoryDef[] = [
     ],
   },
   {
-    id: "cat-motorcycles",
+    id: "c0000000-0000-0000-0000-000000000004",
     name: "Motorcycles",
     slug: "motorcycles",
     iconName: "Bike",
@@ -99,7 +99,7 @@ export const MARKETPLACE_CATEGORIES: MarketplaceCategoryDef[] = [
     ],
   },
   {
-    id: "cat-boats",
+    id: "c0000000-0000-0000-0000-000000000005",
     name: "Boats",
     slug: "boats",
     iconName: "Ship",
@@ -113,7 +113,7 @@ export const MARKETPLACE_CATEGORIES: MarketplaceCategoryDef[] = [
     ],
   },
   {
-    id: "cat-generators",
+    id: "c0000000-0000-0000-0000-000000000006",
     name: "Generators",
     slug: "generators",
     iconName: "Zap",
@@ -132,7 +132,7 @@ export const MARKETPLACE_CATEGORIES: MarketplaceCategoryDef[] = [
     ],
   },
   {
-    id: "cat-cameras",
+    id: "c0000000-0000-0000-0000-000000000007",
     name: "Cameras",
     slug: "cameras",
     iconName: "Camera",
@@ -158,7 +158,7 @@ export const MARKETPLACE_CATEGORIES: MarketplaceCategoryDef[] = [
     ],
   },
   {
-    id: "cat-phones",
+    id: "c0000000-0000-0000-0000-000000000008",
     name: "Phones",
     slug: "phones",
     iconName: "Smartphone",

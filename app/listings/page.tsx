@@ -11,6 +11,7 @@ import {
   getMarketplaceCategories,
   getMarketplaceListings,
 } from "@/lib/supabase/marketplace";
+import { BrowseSearchFilters } from "@/components/marketplace/browse-search-filters";
 
 interface ListingsPageProps {
   searchParams: Promise<{
@@ -18,8 +19,12 @@ interface ListingsPageProps {
     q?: string;
     start?: string;
     end?: string;
+    min?: string;
+    max?: string;
   }>;
 }
+
+export const dynamic = "force-dynamic";
 
 export default async function ListingsPage({ searchParams }: ListingsPageProps) {
   const resolvedParams = await searchParams;
@@ -27,6 +32,38 @@ export default async function ListingsPage({ searchParams }: ListingsPageProps) 
   const currentQuery = resolvedParams.q || "";
   const currentStart = resolvedParams.start || "";
   const currentEnd = resolvedParams.end || "";
+  const currentMin = resolvedParams.min || "";
+  const currentMax = resolvedParams.max || "";
+
+  // Helper to create category hrefs preserving search and price
+  const createFilterHref = (newCategory?: string) => {
+    const params = new URLSearchParams();
+    if (newCategory) params.set("category", newCategory);
+    if (currentQuery) params.set("q", currentQuery);
+    if (currentMin) params.set("min", currentMin);
+    if (currentMax) params.set("max", currentMax);
+    if (currentStart) params.set("start", currentStart);
+    if (currentEnd) params.set("end", currentEnd);
+    const qs = params.toString();
+    return `/listings${qs ? `?${qs}` : ""}`;
+  };
+
+  // Helper to remove a single param from active filter badges
+  const createParamHref = (omitKey: "category" | "q" | "price" | "dates") => {
+    const params = new URLSearchParams();
+    if (omitKey !== "category" && currentCategory) params.set("category", currentCategory);
+    if (omitKey !== "q" && currentQuery) params.set("q", currentQuery);
+    if (omitKey !== "price") {
+      if (currentMin) params.set("min", currentMin);
+      if (currentMax) params.set("max", currentMax);
+    }
+    if (omitKey !== "dates") {
+      if (currentStart) params.set("start", currentStart);
+      if (currentEnd) params.set("end", currentEnd);
+    }
+    const qs = params.toString();
+    return `/listings${qs ? `?${qs}` : ""}`;
+  };
 
   // Fetch categories and listings concurrently
   const [categories, listings] = await Promise.all([
@@ -36,6 +73,8 @@ export default async function ListingsPage({ searchParams }: ListingsPageProps) 
       q: currentQuery,
       start: currentStart,
       end: currentEnd,
+      min: currentMin,
+      max: currentMax,
     }),
   ]);
 
@@ -43,7 +82,8 @@ export default async function ListingsPage({ searchParams }: ListingsPageProps) 
   const activeFiltersCount =
     (currentCategory ? 1 : 0) +
     (currentQuery ? 1 : 0) +
-    (currentStart || currentEnd ? 1 : 0);
+    (currentStart || currentEnd ? 1 : 0) +
+    (currentMin || currentMax ? 1 : 0);
 
   return (
     <div className="flex min-h-screen flex-col bg-background font-sans text-foreground">
@@ -92,9 +132,16 @@ export default async function ListingsPage({ searchParams }: ListingsPageProps) 
               </div>
             </div>
 
+            {/* 1. Search Bar and Price Filter (placed above category chips) */}
+            <BrowseSearchFilters
+              initialQuery={currentQuery}
+              initialMin={currentMin}
+              initialMax={currentMax}
+            />
+
             {/* Active search parameters / dates badge row */}
             {activeFiltersCount > 0 && (
-              <div className="mt-5 flex flex-wrap items-center gap-2 pt-2 border-t border-border/40">
+              <div className="mt-4 flex flex-wrap items-center gap-2 pt-2 border-t border-border/40">
                 <span className="text-xs text-muted-foreground flex items-center gap-1 font-medium">
                   <SlidersHorizontal className="h-3 w-3" /> Active Filters:
                 </span>
@@ -102,7 +149,7 @@ export default async function ListingsPage({ searchParams }: ListingsPageProps) 
                 {currentCategory && (
                   <Badge variant="secondary" className="gap-1 text-xs">
                     Category: {activeCategoryObj?.name || currentCategory}
-                    <Link href={`/listings?q=${encodeURIComponent(currentQuery)}&start=${currentStart}&end=${currentEnd}`}>
+                    <Link href={createParamHref("category")}>
                       <X className="h-3 w-3 hover:text-destructive" />
                     </Link>
                   </Badge>
@@ -111,7 +158,16 @@ export default async function ListingsPage({ searchParams }: ListingsPageProps) 
                 {currentQuery && (
                   <Badge variant="secondary" className="gap-1 text-xs">
                     Search: &ldquo;{currentQuery}&rdquo;
-                    <Link href={`/listings?category=${currentCategory}&start=${currentStart}&end=${currentEnd}`}>
+                    <Link href={createParamHref("q")}>
+                      <X className="h-3 w-3 hover:text-destructive" />
+                    </Link>
+                  </Badge>
+                )}
+
+                {(currentMin || currentMax) && (
+                  <Badge variant="secondary" className="gap-1 text-xs">
+                    Price: ₱{currentMin || "0"} — ₱{currentMax || "∞"}
+                    <Link href={createParamHref("price")}>
                       <X className="h-3 w-3 hover:text-destructive" />
                     </Link>
                   </Badge>
@@ -120,7 +176,7 @@ export default async function ListingsPage({ searchParams }: ListingsPageProps) 
                 {(currentStart || currentEnd) && (
                   <Badge variant="secondary" className="gap-1 text-xs">
                     Dates: {currentStart || "Any"} → {currentEnd || "Any"}
-                    <Link href={`/listings?category=${currentCategory}&q=${encodeURIComponent(currentQuery)}`}>
+                    <Link href={createParamHref("dates")}>
                       <X className="h-3 w-3 hover:text-destructive" />
                     </Link>
                   </Badge>
@@ -136,9 +192,9 @@ export default async function ListingsPage({ searchParams }: ListingsPageProps) 
             )}
 
             {/* Category Filter Tabs */}
-            <div className="mt-6 flex gap-2 overflow-x-auto pb-2 scrollbar-none">
+            <div className="mt-5 flex gap-2 overflow-x-auto pb-2 scrollbar-none">
               <Link
-                href={`/listings?q=${encodeURIComponent(currentQuery)}&start=${currentStart}&end=${currentEnd}`}
+                href={createFilterHref()}
                 className={`whitespace-nowrap rounded-full px-4 py-1.5 text-xs sm:text-sm font-medium transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
                   !currentCategory
                     ? "bg-primary text-primary-foreground shadow-sm"
@@ -152,7 +208,7 @@ export default async function ListingsPage({ searchParams }: ListingsPageProps) 
                 return (
                   <Link
                     key={cat.id}
-                    href={`/listings?category=${cat.slug}&q=${encodeURIComponent(currentQuery)}&start=${currentStart}&end=${currentEnd}`}
+                    href={createFilterHref(cat.slug)}
                     className={`whitespace-nowrap rounded-full px-4 py-1.5 text-xs sm:text-sm font-medium transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
                       isActive
                         ? "bg-primary text-primary-foreground shadow-sm"
@@ -172,7 +228,7 @@ export default async function ListingsPage({ searchParams }: ListingsPageProps) 
           <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
             <div className="mb-6 flex items-center justify-between">
               <span className="text-xs sm:text-sm font-semibold text-muted-foreground">
-                Showing <span className="text-foreground">{listings.length}</span> rental unit{listings.length === 1 ? "" : "s"}
+                Showing <span className="text-foreground">{listings.length}</span> rental units
               </span>
             </div>
 
@@ -295,15 +351,15 @@ export default async function ListingsPage({ searchParams }: ListingsPageProps) 
                   <Search className="h-6 w-6" />
                 </div>
                 <h3 className="font-heading text-lg font-bold text-foreground sm:text-xl">
-                  No listings found matching your criteria
+                  No listings match your filters
                 </h3>
                 <p className="mx-auto mt-2 max-w-md text-sm text-muted-foreground">
-                  We couldn&apos;t find any rental equipment or vehicles for your current selection. Try broadening your dates or checking another category.
+                  We couldn&apos;t find any rental equipment or vehicles for your current selection. Try broadening your search or resetting your filters.
                 </p>
                 <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
                   <Link href="/listings">
                     <Button variant="outline" size="sm" className="font-semibold">
-                      Clear All Filters
+                      Reset Filters
                     </Button>
                   </Link>
                   <Link href="/listings/new">

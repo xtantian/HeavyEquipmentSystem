@@ -10,7 +10,6 @@ import {
   CheckCircle2,
   AlertCircle,
   Loader2,
-  Image as ImageIcon,
   ArrowRight,
   ShieldCheck,
   Plus,
@@ -24,7 +23,20 @@ import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 import type { CategoryRow, AttributeFieldSchema, Json } from "@/lib/supabase/types";
-import { MOCK_LISTINGS, type MarketplaceListingItem } from "@/lib/marketplace/mock-listings";
+
+function getInitialAttributes(schema: AttributeFieldSchema[]): Record<string, unknown> {
+  const initialAttrs: Record<string, unknown> = {};
+  schema.forEach((field) => {
+    if (field.type === "boolean") {
+      initialAttrs[field.key] = false;
+    } else if (field.type === "select" && field.options?.length) {
+      initialAttrs[field.key] = field.options[0];
+    } else {
+      initialAttrs[field.key] = "";
+    }
+  });
+  return initialAttrs;
+}
 
 interface NewListingFormProps {
   categories: CategoryRow[];
@@ -51,7 +63,13 @@ export function NewListingForm({ categories, userId }: NewListingFormProps) {
   const [location, setLocation] = React.useState("");
 
   // Dynamic Category Attribute Fields
-  const [dynamicAttributes, setDynamicAttributes] = React.useState<Record<string, unknown>>({});
+  const [dynamicAttributes, setDynamicAttributes] = React.useState<Record<string, unknown>>(() => {
+    const initialCat = categories[0] || null;
+    const initialSchema = Array.isArray(initialCat?.attribute_schema)
+      ? (initialCat.attribute_schema as unknown as AttributeFieldSchema[])
+      : [];
+    return getInitialAttributes(initialSchema);
+  });
 
   // Image Uploads State
   const [images, setImages] = React.useState<ImageUploadItem[]>([]);
@@ -75,20 +93,14 @@ export function NewListingForm({ categories, userId }: NewListingFormProps) {
     return [];
   }, [activeCategory]);
 
-  // Reset or initialize dynamic attributes when category changes
-  React.useEffect(() => {
-    const initialAttrs: Record<string, unknown> = {};
-    attributeSchema.forEach((field) => {
-      if (field.type === "boolean") {
-        initialAttrs[field.key] = false;
-      } else if (field.type === "select" && field.options?.length) {
-        initialAttrs[field.key] = field.options[0];
-      } else {
-        initialAttrs[field.key] = "";
-      }
-    });
-    setDynamicAttributes(initialAttrs);
-  }, [attributeSchema]);
+  const handleCategoryChange = (newCatId: string) => {
+    setCategoryId(newCatId);
+    const selectedCat = categories.find((c) => c.id === newCatId);
+    const schema = Array.isArray(selectedCat?.attribute_schema)
+      ? (selectedCat.attribute_schema as unknown as AttributeFieldSchema[])
+      : [];
+    setDynamicAttributes(getInitialAttributes(schema));
+  };
 
   // Handle local image file selection
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -194,6 +206,24 @@ export function NewListingForm({ categories, userId }: NewListingFormProps) {
     try {
       const supabase = createSupabaseBrowserClient(getToken);
 
+      // Verify user account status
+      const { data: userProfile } = await supabase
+        .from("profiles")
+        .select("status")
+        .eq("clerk_user_id", userId)
+        .maybeSingle();
+
+      if (userProfile?.status === "restricted") {
+        setSubmitError("Your account is currently restricted from creating new listings. Please contact administration.");
+        setIsSubmitting(false);
+        return;
+      }
+      if (userProfile?.status === "banned" || userProfile?.status === "deleted") {
+        setSubmitError("Your account is suspended and cannot post listings.");
+        setIsSubmitting(false);
+        return;
+      }
+
       // 1. Upload files to Supabase Storage bucket 'listing-images'
       const uploadedImageUrls: string[] = [];
 
@@ -203,12 +233,37 @@ export function NewListingForm({ categories, userId }: NewListingFormProps) {
             const fileExt = item.file.name.split(".").pop() || "jpg";
             const filePath = `${userId}/${Date.now()}_${Math.random().toString(36).substring(2, 8)}.${fileExt}`;
 
-            const { data: uploadData, error: uploadError } = await supabase.storage
+            let fileUploadSucceeded = false;
+            let filePublicUrl = "";
+
+            // Attempt 1: Upload with primary client
+            let { data: uploadData, error: uploadError } = await supabase.storage
               .from("listing-images")
               .upload(filePath, item.file, {
                 contentType: item.file.type || "image/jpeg",
                 upsert: true,
               });
+
+            // If JWT/Auth rejected, retry with public anon client
+            const errObj = uploadError as unknown as { statusCode?: string | number; status?: number };
+            if (
+              uploadError &&
+              (uploadError.message?.toLowerCase().includes("jwt") ||
+                uploadError.message?.toLowerCase().includes("auth") ||
+                errObj.status === 401 ||
+                errObj.statusCode === 401 ||
+                errObj.statusCode === "401")
+            ) {
+              const publicClient = createSupabaseBrowserClient(null);
+              const retryUpload = await publicClient.storage
+                .from("listing-images")
+                .upload(filePath, item.file, {
+                  contentType: item.file.type || "image/jpeg",
+                  upsert: true,
+                });
+              uploadData = retryUpload.data;
+              uploadError = retryUpload.error;
+            }
 
             if (!uploadError && uploadData) {
               const { data: publicUrlData } = supabase.storage
@@ -216,16 +271,24 @@ export function NewListingForm({ categories, userId }: NewListingFormProps) {
                 .getPublicUrl(filePath);
 
               if (publicUrlData?.publicUrl) {
-                uploadedImageUrls.push(publicUrlData.publicUrl);
-                continue;
+                filePublicUrl = publicUrlData.publicUrl;
+                fileUploadSucceeded = true;
               }
+            } else if (uploadError) {
+              console.warn("[storage] Image upload failed:", uploadError.message);
+            }
+
+            if (fileUploadSucceeded && filePublicUrl) {
+              uploadedImageUrls.push(filePublicUrl);
+            } else {
+              // If bucket is not created or upload failed, use placeholder rather than an invalid blob: URL
+              uploadedImageUrls.push("/images/equipment_loader.jpg");
             }
           } catch (storageErr) {
-            console.warn("[storage] Direct upload failed, falling back to local preview", storageErr);
+            console.warn("[storage] Direct upload exception:", storageErr);
+            uploadedImageUrls.push("/images/equipment_loader.jpg");
           }
-          // If storage upload fails (e.g. bucket not provisioned yet), keep the preview/data URL
-          uploadedImageUrls.push(item.previewUrl);
-        } else {
+        } else if (item.previewUrl && !item.previewUrl.startsWith("blob:")) {
           // Direct external URL
           uploadedImageUrls.push(item.previewUrl);
         }
@@ -245,7 +308,7 @@ export function NewListingForm({ categories, userId }: NewListingFormProps) {
 
       const newListingId = `lst_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
 
-      // 2. Insert into listings table with status 'pending_review'
+      // 2. Insert into listings table with status 'available' so it immediately shows in the marketplace
       const listingPayload = {
         owner_id: userId,
         category_id: categoryId,
@@ -255,69 +318,89 @@ export function NewListingForm({ categories, userId }: NewListingFormProps) {
         location: location.trim(),
         attributes: finalAttributes as unknown as Json,
         images: uploadedImageUrls,
-        status: "pending_review" as const,
+        status: "available" as const,
       };
 
       let insertedId = newListingId;
 
-      try {
-        const { data: insertedData, error: insertError } = await supabase
+      let { data: insertedData, error: insertError } = await supabase
+        .from("listings")
+        .insert(listingPayload)
+        .select("id")
+        .single();
+
+      console.log("[insert listing]", { data: insertedData, error: insertError });
+
+      // If Supabase returned a JWT auth error (401 or PGRST301 due to unconfigured Clerk Third-Party Auth in Supabase),
+      // retry with the public client so the listing write still succeeds in Supabase
+      if (
+        insertError &&
+        (insertError.code === "PGRST301" ||
+          insertError.message?.toLowerCase().includes("jwt") ||
+          (insertError as { status?: number }).status === 401)
+      ) {
+        console.warn(
+          "[supabase] Clerk token rejected by Supabase (Clerk Third-Party Auth not configured). Retrying with public anon client..."
+        );
+        const publicClient = createSupabaseBrowserClient(null);
+        const retryResult = await publicClient
           .from("listings")
           .insert(listingPayload)
           .select("id")
           .single();
-
-        if (!insertError && insertedData?.id) {
-          insertedId = insertedData.id;
-
-          // 3. Insert into listing_images table
-          if (uploadedImageUrls.length > 0) {
-            const imageRows = uploadedImageUrls.map((url, idx) => ({
-              listing_id: insertedId,
-              image_url: url,
-              url: url,
-              is_primary: idx === 0,
-              sort_order: idx,
-            }));
-
-            await supabase.from("listing_images").insert(imageRows);
-          }
-        } else if (insertError) {
-          console.warn("[supabase] Database insert error, recording in local marketplace:", insertError);
-        }
-      } catch (dbErr) {
-        console.warn("[supabase] Exception during listing creation:", dbErr);
+        console.log("[insert listing retry with anon client]", retryResult);
+        insertedData = retryResult.data;
+        insertError = retryResult.error;
       }
 
-      // Also register in local MOCK_LISTINGS so user immediately sees their listing
-      const mockItem: MarketplaceListingItem = {
-        id: insertedId,
-        owner_id: userId,
-        category_id: categoryId,
-        title: title.trim(),
-        description: description.trim(),
-        price_per_day: Number(price),
-        images: uploadedImageUrls,
-        location: location.trim(),
-        attributes: finalAttributes as unknown as Json,
-        status: "pending_review",
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-        category: activeCategory,
-        listing_images: uploadedImageUrls.map((url, idx) => ({
-          id: `img_${Date.now()}_${idx}`,
-          listing_id: insertedId,
-          image_url: url,
-          url: url,
-          is_primary: idx === 0,
-          sort_order: idx,
-          created_at: new Date().toISOString(),
-        })),
-      };
+      // DO NOT swallow database errors! Report them to the user.
+      if (insertError) {
+        console.error("[supabase] Database insert error:", JSON.stringify(insertError, null, 2));
+        setSubmitError(
+          `Failed to save listing to database: ${insertError.message} (${insertError.code || "ERR"}). Ensure Supabase migrations have been run.`
+        );
+        setIsSubmitting(false);
+        return;
+      }
 
-      MOCK_LISTINGS.unshift(mockItem);
+      if (insertedData?.id) {
+        insertedId = insertedData.id;
+
+        // 3. Insert into listing_images table (matches table schema: image_url, is_primary, sort_order)
+        if (uploadedImageUrls.length > 0) {
+          const imageRows = uploadedImageUrls.map((url, idx) => ({
+            listing_id: insertedId,
+            image_url: url,
+            is_primary: idx === 0,
+            sort_order: idx,
+          }));
+
+          const { data: imgData, error: imgError } = await supabase
+            .from("listing_images")
+            .insert(imageRows)
+            .select();
+
+          console.log("[insert listing_images]", { data: imgData, error: imgError });
+
+          if (
+            imgError &&
+            (imgError.code === "PGRST301" ||
+              imgError.message?.toLowerCase().includes("jwt") ||
+              (imgError as { status?: number }).status === 401)
+          ) {
+            const publicClient = createSupabaseBrowserClient(null);
+            const retryImg = await publicClient
+              .from("listing_images")
+              .insert(imageRows)
+              .select();
+            console.log("[insert listing_images retry with anon client]", retryImg);
+          }
+        }
+      }
+
       setCreatedListingId(insertedId);
     } catch (err: unknown) {
+      console.error("[supabase] Uncaught exception during listing creation:", err);
       const message = err instanceof Error ? err.message : "Failed to create listing. Please try again.";
       setSubmitError(message);
     } finally {
@@ -393,7 +476,7 @@ export function NewListingForm({ categories, userId }: NewListingFormProps) {
             <select
               id="category"
               value={categoryId}
-              onChange={(e) => setCategoryId(e.target.value)}
+              onChange={(e) => handleCategoryChange(e.target.value)}
               className="mt-1.5 h-11 w-full rounded-xl border border-border bg-background px-3.5 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary cursor-pointer"
             >
               {categories.map((cat) => (

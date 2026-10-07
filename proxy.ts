@@ -2,26 +2,28 @@ import { clerkMiddleware, createRouteMatcher } from "@clerk/nextjs/server";
 import type { NextRequest } from "next/server";
 
 /**
- * Routes that do not require an authenticated Clerk session.
+ * Routes that require an authenticated Clerk session.
  *
- * - "/" – public landing page
- * - "/sign-in" / "/sign-up" – Clerk-hosted auth UI (catch-all sub-paths)
- * - "/api/webhooks/clerk" – signature-verified webhook; intentionally public so
- *   Clerk can POST without a session token (verified by HMAC signature instead)
+ * - "/listings/new" – creating a new listing requires an authenticated user
+ * - "/dashboard(.*)" – customer and staff dashboard management
+ *
+ * All other routes (landing page, browse /listings, item details /listings/[id],
+ * inquiry forms, auth pages, and webhooks) are public and do not redirect visitors.
  */
-const isPublicRoute = createRouteMatcher([
-  "/",
-  "/sign-in(.*)",
-  "/sign-up(.*)",
-  "/api/webhooks/clerk(.*)",
+const isProtectedRoute = createRouteMatcher([
+  "/listings/new(.*)",
+  "/dashboard(.*)",
+  "/admin(.*)",
 ]);
 
 export default clerkMiddleware(async (auth, req: NextRequest) => {
-  if (!isPublicRoute(req)) {
-    // auth.protect() redirects unauthenticated users to sign-in and returns
-    // a 401/404 for unauthenticated API/trpc requests.
+  if (isProtectedRoute(req)) {
+    // auth.protect() redirects unauthenticated users to sign-in
     await auth.protect();
   }
+}, {
+  // Allow up to 60s tolerance for local development clock skew against Clerk server
+  clockSkewInMs: 60000,
 });
 
 export const config = {

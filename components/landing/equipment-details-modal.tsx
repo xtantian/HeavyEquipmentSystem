@@ -52,8 +52,18 @@ export function EquipmentDetailsModal({
   const [view, setView] = React.useState<"details" | "inquiry">("details");
 
   // Inquiry Form Fields pre-filled with machine & user context
-  const [fullName, setFullName] = React.useState<string>("");
-  const [email, setEmail] = React.useState<string>("");
+  const userFullName = user?.fullName || user?.firstName || "";
+  const userEmail = user?.primaryEmailAddress?.emailAddress || "";
+  const [prevUserKey, setPrevUserKey] = React.useState(user?.id || "");
+  const [fullName, setFullName] = React.useState(userFullName);
+  const [email, setEmail] = React.useState(userEmail);
+
+  if (user && user.id !== prevUserKey) {
+    setPrevUserKey(user.id);
+    if (!fullName) setFullName(userFullName);
+    if (!email) setEmail(userEmail);
+  }
+
   const [phone, setPhone] = React.useState<string>("");
   const [projectLocation, setProjectLocation] = React.useState<string>("");
   const [startDate, setStartDate] = React.useState<string>("");
@@ -76,31 +86,20 @@ export function EquipmentDetailsModal({
     }
   };
 
-  // Pre-fill user information from Clerk session if signed in
-  React.useEffect(() => {
-    if (user) {
-      if (!fullName) {
-        setFullName(user.fullName || user.firstName || "");
-      }
-      if (!email && user.primaryEmailAddress) {
-        setEmail(user.primaryEmailAddress.emailAddress);
-      }
-    }
-  }, [user, fullName, email]);
-
-  // Pre-fill default message with active machine specifications when viewing inquiry
-  React.useEffect(() => {
-    if (equipment && view === "inquiry" && !message) {
-      const specSummary = equipment.specs && equipment.specs.length > 0
-        ? equipment.specs.map((s) => `${s.label}: ${s.value}`).join(", ")
-        : "";
+  const handleSwitchToInquiry = () => {
+    setView("inquiry");
+    if (equipment && !message) {
+      const specSummary =
+        equipment.specs && equipment.specs.length > 0
+          ? equipment.specs.map((s) => `${s.label}: ${s.value}`).join(", ")
+          : "";
       setMessage(
         `Rental inquiry for ${equipment.name} (${equipment.model}) [${specSummary}] at ${formatCurrency(
           equipment.rate.daily
         )}/day.`
       );
     }
-  }, [equipment, view, message]);
+  };
 
   if (!equipment) return null;
 
@@ -307,7 +306,7 @@ export function EquipmentDetailsModal({
                   Close
                 </Button>
                 <Button
-                  onClick={() => setView("inquiry")}
+                  onClick={handleSwitchToInquiry}
                   disabled={!isAvailable}
                   className="font-semibold bg-blue-600 hover:bg-blue-700 text-white shadow-sm transition-colors"
                 >

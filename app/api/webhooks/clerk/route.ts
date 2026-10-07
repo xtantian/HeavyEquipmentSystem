@@ -145,6 +145,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           first_name: null,
           last_name: null,
           avatar_url: null,
+          status: "deleted",
           updated_at: new Date().toISOString(),
         })
         .eq("clerk_user_id", id);
