@@ -46,6 +46,7 @@ interface RequestToBookCardProps {
   depositAmount: number;
   ownerId?: string;
   bookedRanges?: BookedRangeItem[];
+  listingStatus?: string;
 }
 
 export function RequestToBookCard({
@@ -54,6 +55,7 @@ export function RequestToBookCard({
   pricePerDay,
   depositAmount,
   bookedRanges = [],
+  listingStatus = "available",
 }: RequestToBookCardProps) {
   const today = React.useMemo(() => startOfToday(), []);
 
@@ -277,6 +279,13 @@ export function RequestToBookCard({
       ) : (
         /* Booking Form */
         <form onSubmit={handleRequestToBook} className="mt-5 space-y-4">
+          {listingStatus !== "available" && (
+            <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-700 dark:text-amber-300 flex items-center gap-2">
+              <AlertCircle className="h-4 w-4 shrink-0" />
+              <span>This listing is currently marked <strong>Not Available</strong> and cannot be booked.</span>
+            </div>
+          )}
+
           {/* Date Range Picker with Disabled Booked Dates */}
           <div>
             <div className="flex items-center justify-between mb-1.5">
@@ -415,7 +424,12 @@ export function RequestToBookCard({
           <Button
             type="submit"
             size="lg"
-            disabled={isSubmitting || hasRangeConflict || durationDays === 0}
+            disabled={
+              isSubmitting ||
+              hasRangeConflict ||
+              durationDays === 0 ||
+              listingStatus !== "available"
+            }
             className="w-full font-bold shadow-lg shadow-primary/20 h-12 text-base mt-2 cursor-pointer"
           >
             {isSubmitting ? (
@@ -423,6 +437,8 @@ export function RequestToBookCard({
                 <Loader2 className="mr-2 h-4 w-4 animate-spin" />
                 Submitting Request...
               </>
+            ) : listingStatus !== "available" ? (
+              "Not Available for Rent"
             ) : (
               <>
                 Request to Book

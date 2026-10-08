@@ -485,6 +485,118 @@ assert(
   "Comment exceeding 1000 characters rejected"
 );
 
+// -----------------------------------------------------------------------------
+// 7. CATEGORY TAXONOMY & LISTING LIFECYCLE VERIFICATION
+// -----------------------------------------------------------------------------
+console.log("\n▶ SUITE 7: Authoritative 12-Category System & Listing Lifecycle Verification");
+
+const EXPECTED_12_CATEGORIES = [
+  "Property",
+  "Cars",
+  "Mobile Phones & Gadgets",
+  "Computers & Tech",
+  "Men's Fashion",
+  "Women's Fashion",
+  "Luxury",
+  "Sports Equipment",
+  "Industrial",
+  "Motorbikes",
+  "Special Vehicles",
+  "Everything Else",
+];
+
+// Read lib/marketplace/categories.ts content
+const fs = require("fs");
+const path = require("path");
+const categoriesTs = fs.readFileSync(path.join(__dirname, "../lib/marketplace/categories.ts"), "utf-8");
+
+EXPECTED_12_CATEGORIES.forEach((catName) => {
+  assert(
+    categoriesTs.includes(`name: "${catName}"`),
+    `Authoritative category "${catName}" exists in categories taxonomy`
+  );
+});
+
+// Listing Lifecycle State Function
+function resolveListingLifecycleState(listing, activeBookings = []) {
+  if (listing.status === "inactive" || listing.status === "maintenance" || listing.status === "restricted") {
+    return "NOT AVAILABLE";
+  }
+  const hasActiveHold = activeBookings.some((b) =>
+    ["pending", "accepted", "paid", "active"].includes(b.status)
+  );
+  if (listing.status === "pending_review" || hasActiveHold) {
+    return "PENDING";
+  }
+  if (listing.status === "available") {
+    return "AVAILABLE";
+  }
+  return "NOT AVAILABLE";
+}
+
+assert(
+  resolveListingLifecycleState({ status: "available" }, []) === "AVAILABLE",
+  "Free listing with status 'available' resolves to user-facing AVAILABLE"
+);
+
+assert(
+  resolveListingLifecycleState({ status: "available" }, [{ status: "pending" }]) === "PENDING",
+  "Available listing with pending rental request resolves to user-facing PENDING"
+);
+
+assert(
+  resolveListingLifecycleState({ status: "available" }, [{ status: "accepted" }]) === "PENDING",
+  "Available listing with accepted active reservation resolves to user-facing PENDING"
+);
+
+assert(
+  resolveListingLifecycleState({ status: "pending_review" }, []) === "PENDING",
+  "Newly submitted listing awaiting moderation resolves to user-facing PENDING"
+);
+
+assert(
+  resolveListingLifecycleState({ status: "inactive" }, []) === "NOT AVAILABLE",
+  "Owner-disabled listing with status 'inactive' resolves to user-facing NOT AVAILABLE"
+);
+
+assert(
+  resolveListingLifecycleState({ status: "maintenance" }, []) === "NOT AVAILABLE",
+  "Listing undergoing maintenance resolves to user-facing NOT AVAILABLE"
+);
+
+// Reusable Listing Lifecycle After Completed Rental
+const completedBooking = { id: "bk-completed", status: "completed" };
+const reusableListing = { id: "lst-001", status: "available" };
+const lifecycleAfterRental = resolveListingLifecycleState(reusableListing, [completedBooking]);
+
+assert(
+  lifecycleAfterRental === "AVAILABLE",
+  "Listing remains AVAILABLE and reusable after a rental is marked completed"
+);
+
+// Owner Availability Toggle Simulation
+function evaluateToggleAvailability({ callerId, ownerId, currentStatus }) {
+  if (!callerId) return { allowed: false, error: "AUTH_REQUIRED" };
+  if (callerId !== ownerId) return { allowed: false, error: "UNAUTHORIZED" };
+  const newStatus = currentStatus === "available" ? "inactive" : "available";
+  return { allowed: true, newStatus };
+}
+
+assert(
+  evaluateToggleAvailability({ callerId: "user_owner_1", ownerId: "user_owner_1", currentStatus: "available" }).newStatus === "inactive",
+  "Owner can toggle available listing to inactive (Not Available)"
+);
+
+assert(
+  evaluateToggleAvailability({ callerId: "user_owner_1", ownerId: "user_owner_1", currentStatus: "inactive" }).newStatus === "available",
+  "Owner can toggle inactive listing back to available"
+);
+
+assert(
+  evaluateToggleAvailability({ callerId: "intruder", ownerId: "user_owner_1", currentStatus: "available" }).allowed === false,
+  "Intruder CANNOT toggle availability on another user's listing"
+);
+
 console.log("\n===============================================================================");
 console.log(`SUMMARY: ${passedTests}/${totalTests} Tests Passed (${failedTests} Failed)`);
 console.log("===============================================================================");

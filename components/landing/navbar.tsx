@@ -2,21 +2,28 @@
 
 import * as React from "react";
 import Link from "next/link";
+import { usePathname } from "next/navigation";
 import { UserButton, useAuth, useUser } from "@clerk/nextjs";
 import { HardHat, Menu, X, ArrowRight, ShieldCheck } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
-const navLinks = [
-  { name: "Listings", href: "/listings" },
-  { name: "Categories", href: "#categories" },
-  { name: "How It Works", href: "#how-it-works" },
-];
-
 export function Navbar() {
+  const pathname = usePathname();
   const [mobileMenuOpen, setMobileMenuOpen] = React.useState(false);
   const { isSignedIn } = useAuth();
   const { user } = useUser();
   const isAdmin = user?.publicMetadata?.role === "admin";
+
+  const isListingsSection = pathname.startsWith("/listings");
+
+  // Keep navigation clean on /listings without redundant categories / how it works links
+  const activeNavLinks = isListingsSection
+    ? [{ name: "Browse Listings", href: "/listings" }]
+    : [
+        { name: "Listings", href: "/listings" },
+        { name: "Categories", href: pathname === "/" ? "#categories" : "/#categories" },
+        { name: "How It Works", href: pathname === "/" ? "#how-it-works" : "/#how-it-works" },
+      ];
 
   // Close mobile menu on escape key
   React.useEffect(() => {
@@ -54,7 +61,7 @@ export function Navbar() {
           className="hidden md:flex items-center gap-1 lg:gap-2"
           aria-label="Main Navigation"
         >
-          {navLinks.map((link) => (
+          {activeNavLinks.map((link) => (
             <a
               key={link.name}
               href={link.href}
@@ -141,7 +148,7 @@ export function Navbar() {
       {mobileMenuOpen && (
         <div className="border-b border-border bg-background px-4 pt-2 pb-6 md:hidden animate-in slide-in-from-top-2 duration-150">
           <nav className="flex flex-col space-y-2 py-2" aria-label="Mobile Navigation">
-            {navLinks.map((link) => (
+            {activeNavLinks.map((link) => (
               <a
                 key={link.name}
                 href={link.href}

@@ -16,11 +16,12 @@ import {
   Plus,
   ArrowRight,
   ExternalLink,
-  Shield,
   Loader2,
   Image as ImageIcon,
   Trash2,
   Star,
+  History,
+  Power,
 } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -28,28 +29,36 @@ import { Badge } from "@/components/ui/badge";
 import { formatCurrency, calculateInclusiveRentalDays } from "@/lib/utils";
 import type { DashboardBookingItem } from "@/lib/supabase/marketplace";
 import type { MarketplaceListingItem } from "@/lib/marketplace/mock-listings";
-import { updateBookingStatusAction, deleteUserListingAction } from "@/app/dashboard/actions";
+import {
+  updateBookingStatusAction,
+  deleteUserListingAction,
+  toggleListingAvailabilityAction,
+} from "@/app/dashboard/actions";
 import { WriteListerReviewModal } from "@/components/reviews/write-lister-review-modal";
 
 interface DashboardTabsProps {
   initialRentals: DashboardBookingItem[];
   initialListings: MarketplaceListingItem[];
   initialIncomingBookings: DashboardBookingItem[];
-  userId: string;
+  initialRentalHistory?: DashboardBookingItem[];
+  userId?: string;
 }
 
 export function DashboardTabs({
   initialRentals,
   initialListings,
   initialIncomingBookings,
-  userId,
+  initialRentalHistory = [],
+  userId: _userId,
 }: DashboardTabsProps) {
   const [activeTab, setActiveTab] = React.useState<"rentals" | "listings">("rentals");
+  const [listingsSubTab, setListingsSubTab] = React.useState<"active" | "history">("active");
 
   // State for optimistic updates
   const [rentals, setRentals] = React.useState<DashboardBookingItem[]>(initialRentals);
   const [incomingBookings, setIncomingBookings] = React.useState<DashboardBookingItem[]>(initialIncomingBookings);
   const [listings, setListings] = React.useState<MarketplaceListingItem[]>(initialListings);
+  const [rentalHistory] = React.useState<DashboardBookingItem[]>(initialRentalHistory);
 
   // Review modal state
   const [reviewingBooking, setReviewingBooking] = React.useState<{
@@ -108,13 +117,59 @@ export function DashboardTabs({
         );
       case "completed":
         return (
-          <Badge variant="secondary" className="font-semibold px-2.5 py-0.5 text-xs">
+          <Badge variant="secondary" className="font-semibold px-2.5 py-0.5 text-xs bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border-emerald-500/30">
+            <CheckCircle2 className="mr-1 h-3 w-3" />
             Completed
+          </Badge>
+        );
+      case "returned":
+        return (
+          <Badge variant="secondary" className="font-semibold px-2.5 py-0.5 text-xs bg-blue-500/15 text-blue-700 dark:text-blue-300 border-blue-500/30">
+            <CheckCircle2 className="mr-1 h-3 w-3" />
+            Returned
           </Badge>
         );
       default:
         return <Badge variant="outline">{status}</Badge>;
     }
+  };
+
+  // Helper for Listing Lifecycle status in Active listings
+  const getListingStateInfo = (item: MarketplaceListingItem) => {
+    if (item.status === "inactive" || item.status === "maintenance" || item.status === "restricted") {
+      return {
+        label: "Not Available",
+        badge: (
+          <Badge variant="outline" className="border-muted-foreground/40 bg-muted text-muted-foreground font-semibold text-[11px] px-2 py-0.5">
+            <AlertCircle className="mr-1 h-3 w-3" />
+            Not Available
+          </Badge>
+        ),
+        isAvailable: false,
+      };
+    }
+    if (item.status === "pending_review" || item.has_active_reservation) {
+      return {
+        label: "Pending",
+        badge: (
+          <Badge variant="outline" className="border-amber-500/50 bg-amber-500/10 text-amber-600 font-semibold text-[11px] px-2 py-0.5">
+            <Clock className="mr-1 h-3 w-3" />
+            Pending
+          </Badge>
+        ),
+        isAvailable: false,
+      };
+    }
+    return {
+      label: "Available",
+      badge: (
+        <Badge className="bg-emerald-600 text-white font-semibold text-[11px] px-2 py-0.5">
+          <CheckCircle2 className="mr-1 h-3 w-3" />
+          Available
+        </Badge>
+      ),
+      isAvailable: true,
+    };
   };
 
   // Cancel booking action (from Renter tab)
@@ -123,7 +178,6 @@ export function DashboardTabs({
 
     setLoadingActions((prev) => ({ ...prev, [bookingId]: true }));
     try {
-      // Optimistic update
       setRentals((prev) =>
         prev.map((item) =>
           item.id === bookingId ? { ...item, status: "cancelled" } : item
@@ -147,7 +201,6 @@ export function DashboardTabs({
   const handleAcceptRequest = async (bookingId: string) => {
     setLoadingActions((prev) => ({ ...prev, [bookingId]: true }));
     try {
-      // Optimistic update
       setIncomingBookings((prev) =>
         prev.map((item) =>
           item.id === bookingId ? { ...item, status: "accepted" } : item
@@ -173,7 +226,6 @@ export function DashboardTabs({
 
     setLoadingActions((prev) => ({ ...prev, [bookingId]: true }));
     try {
-      // Optimistic update
       setIncomingBookings((prev) =>
         prev.map((item) =>
           item.id === bookingId ? { ...item, status: "cancelled" } : item
@@ -193,9 +245,51 @@ export function DashboardTabs({
     }
   };
 
+  // Toggle listing availability action (Owner controls available <-> inactive)
+  const handleToggleAvailability = async (listingId: string) => {
+    setLoadingActions((prev) => ({ ...prev, [listingId]: true }));
+    try {
+      const currentListing = listings.find((l) => l.id === listingId);
+      const willBeAvailable = currentListing?.status !== "available";
+
+      // Optimistic update
+      setListings((prev) =>
+        prev.map((item) =>
+          item.id === listingId
+            ? { ...item, status: willBeAvailable ? "available" : "inactive" }
+            : item
+        )
+      );
+
+      const res = await toggleListingAvailabilityAction(listingId);
+      if (res.error) {
+        showNotification(res.error, "info");
+        // Revert
+        setListings((prev) =>
+          prev.map((item) =>
+            item.id === listingId
+              ? { ...item, status: willBeAvailable ? "inactive" : "available" }
+              : item
+          )
+        );
+      } else {
+        showNotification(
+          res.newStatus === "available"
+            ? "Listing is now Available for rent."
+            : "Listing is now marked Not Available.",
+          "success"
+        );
+      }
+    } catch (err) {
+      console.error("Toggle listing availability error:", err);
+    } finally {
+      setLoadingActions((prev) => ({ ...prev, [listingId]: false }));
+    }
+  };
+
   // Delete own listing action (from Owner tab)
   const handleDeleteListing = async (listingId: string) => {
-    if (!confirm("Are you sure you want to delete this listing?")) return;
+    if (!confirm("Are you sure you want to remove this listing?")) return;
 
     setLoadingActions((prev) => ({ ...prev, [listingId]: true }));
     try {
@@ -204,7 +298,7 @@ export function DashboardTabs({
       if (res.error) {
         showNotification(res.error, "info");
       } else {
-        showNotification("Listing deleted successfully.", "success");
+        showNotification("Listing removed successfully.", "success");
       }
     } catch (err) {
       console.error("Delete listing error:", err);
@@ -229,14 +323,14 @@ export function DashboardTabs({
           <span>{notification.text}</span>
           <button
             onClick={() => setNotification(null)}
-            className="ml-3 text-muted-foreground hover:text-foreground"
+            className="ml-3 text-muted-foreground hover:text-foreground cursor-pointer"
           >
             ✕
           </button>
         </div>
       )}
 
-      {/* 2-Tab Navigation Bar */}
+      {/* Primary 2-Tab Navigation Bar */}
       <div className="flex border-b border-border/80">
         <button
           type="button"
@@ -348,13 +442,6 @@ export function DashboardTabs({
                             {listing?.title || "Reserved Unit"}
                           </h3>
 
-                          {listing?.location && (
-                            <div className="mt-1 flex items-center gap-1.5 text-xs text-muted-foreground">
-                              <MapPin className="h-3.5 w-3.5 text-primary shrink-0" />
-                              <span className="truncate">{listing.location}</span>
-                            </div>
-                          )}
-
                           <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
                             <div className="flex items-center gap-1.5">
                               <Calendar className="h-3.5 w-3.5 text-muted-foreground" />
@@ -367,69 +454,64 @@ export function DashboardTabs({
                               </span>
                             </div>
 
-                            <div className="font-semibold text-foreground">
-                              Total: {formatCurrency(booking.total_price)}
+                            <div className="flex items-center gap-1.5">
+                              <MapPin className="h-3.5 w-3.5 text-muted-foreground" />
+                              <span className="truncate max-w-[200px]">{listing?.location || "Pickup location"}</span>
                             </div>
                           </div>
                         </div>
                       </div>
 
-                      {/* Right: Status & Cancel Button */}
+                      {/* Right: Price & Status & Actions */}
                       <div className="flex flex-row md:flex-col items-center md:items-end justify-between md:justify-center gap-3 pt-3 md:pt-0 border-t md:border-t-0 border-border/60">
-                        {renderStatusBadge(booking.status)}
+                        <div className="text-left md:text-right">
+                          <span className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider block">
+                            Total Price
+                          </span>
+                          <span className="text-base sm:text-lg font-extrabold text-foreground">
+                            {formatCurrency(booking.total_price)}
+                          </span>
+                        </div>
 
-                        {/* Review Host Action for eligible completed/returned rentals */}
-                        {(booking.status === "completed" || booking.status === "returned") && (
-                          booking.is_reviewed ? (
-                            <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-600 bg-emerald-500/10 px-2 py-1 rounded-md">
-                              <Star className="h-3 w-3 fill-emerald-600 text-emerald-600" />
-                              Review Submitted
-                            </span>
-                          ) : (
+                        <div className="flex items-center gap-2">
+                          {renderStatusBadge(booking.status)}
+
+                          {canCancel && (
                             <Button
                               type="button"
+                              variant="outline"
+                              size="sm"
+                              disabled={isActionLoading}
+                              onClick={() => handleCancelBooking(booking.id)}
+                              className="border-destructive/40 text-destructive hover:bg-destructive/10 text-xs font-semibold cursor-pointer h-7 px-2.5"
+                            >
+                              {isActionLoading ? (
+                                <Loader2 className="h-3 w-3 animate-spin" />
+                              ) : (
+                                "Cancel"
+                              )}
+                            </Button>
+                          )}
+
+                          {(booking.status === "completed" || booking.status === "returned") && (
+                            <Button
+                              type="button"
+                              variant="outline"
                               size="sm"
                               onClick={() =>
                                 setReviewingBooking({
                                   id: booking.id,
-                                  listerName: listing?.title ? `Host of ${listing.title}` : "Host",
+                                  listerName: listing?.title ? `Owner of ${listing.title}` : "Equipment Owner",
                                 })
                               }
-                              className="text-xs bg-amber-500 hover:bg-amber-600 text-white font-semibold cursor-pointer shadow-xs"
+                              disabled={booking.is_reviewed}
+                              className="text-xs font-semibold border-primary/40 text-primary hover:bg-primary/10 h-7 px-2.5 cursor-pointer"
                             >
-                              <Star className="mr-1.5 h-3.5 w-3.5 fill-white text-white" />
-                              Review Host
+                              <Star className="mr-1 h-3 w-3 fill-primary/30" />
+                              {booking.is_reviewed ? "Reviewed" : "Review Lister"}
                             </Button>
-                          )
-                        )}
-
-                        {canCancel && (
-                          <Button
-                            type="button"
-                            variant="outline"
-                            size="sm"
-                            disabled={isActionLoading}
-                            onClick={() => handleCancelBooking(booking.id)}
-                            className="text-xs text-destructive hover:bg-destructive/10 hover:text-destructive border-destructive/30 cursor-pointer"
-                          >
-                            {isActionLoading ? (
-                              <>
-                                <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
-                                Cancelling...
-                              </>
-                            ) : (
-                              "Cancel Reservation"
-                            )}
-                          </Button>
-                        )}
-
-                        {listing?.id && (
-                          <Link href={`/listings/${listing.id}`}>
-                            <span className="text-[11px] text-muted-foreground hover:text-foreground inline-flex items-center gap-1">
-                              View Listing <ExternalLink className="h-3 w-3" />
-                            </span>
-                          </Link>
-                        )}
+                          )}
+                        </div>
                       </div>
                     </div>
                   </Card>
@@ -439,12 +521,15 @@ export function DashboardTabs({
           ) : (
             <Card className="rounded-2xl border border-dashed border-border/80 bg-muted/20 p-12 text-center">
               <CalendarCheck className="mx-auto h-12 w-12 text-muted-foreground mb-3" />
-              <h3 className="font-heading text-lg font-bold text-foreground">No active rentals found</h3>
+              <h3 className="font-heading text-lg font-bold text-foreground">No rental bookings yet</h3>
               <p className="mt-1 text-xs sm:text-sm text-muted-foreground max-w-sm mx-auto">
-                You haven&apos;t booked any equipment or vehicles yet. Browse our marketplace to find verified items.
+                Explore our catalog to find excavators, heavy machinery, and commercial vehicles available for flexible rental.
               </p>
               <Link href="/listings" className="mt-5 inline-block">
-                <Button size="sm">Browse Listings</Button>
+                <Button size="sm">
+                  Browse Marketplace
+                  <ArrowRight className="ml-1.5 h-3.5 w-3.5" />
+                </Button>
               </Link>
             </Card>
           )}
@@ -453,283 +538,459 @@ export function DashboardTabs({
 
       {/* ══════════════ TAB 2: MY LISTINGS ══════════════ */}
       {activeTab === "listings" && (
-        <div className="space-y-8">
-          {/* Section 1: Incoming Booking Requests */}
-          <div className="space-y-4">
-            <div className="flex items-center justify-between border-b border-border/60 pb-3">
-              <div>
-                <h2 className="font-heading text-lg sm:text-xl font-bold text-foreground flex items-center gap-2">
-                  Incoming Booking Requests
-                  {pendingIncomingCount > 0 && (
-                    <Badge className="bg-amber-500 text-white text-xs">
-                      {pendingIncomingCount} Action Required
-                    </Badge>
-                  )}
-                </h2>
-                <p className="text-xs text-muted-foreground">
-                  Review and accept or decline reservation requests for your listed units.
-                </p>
-              </div>
+        <div className="space-y-6">
+          {/* Sub-Tabs: [ Active Listings ] [ Rental History ] */}
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 border-b border-border/70 pb-4">
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setListingsSubTab("active")}
+                className={`inline-flex items-center gap-2 rounded-xl px-4 py-2 text-xs sm:text-sm font-semibold transition-all cursor-pointer ${
+                  listingsSubTab === "active"
+                    ? "bg-primary text-primary-foreground shadow-sm"
+                    : "bg-muted/70 text-muted-foreground hover:bg-muted hover:text-foreground"
+                }`}
+              >
+                <Layers className="h-4 w-4" />
+                <span>Active Listings</span>
+                <Badge
+                  variant={listingsSubTab === "active" ? "secondary" : "outline"}
+                  className="ml-1 text-[11px] px-1.5 py-0 h-4"
+                >
+                  {listings.length}
+                </Badge>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setListingsSubTab("history")}
+                className={`inline-flex items-center gap-2 rounded-xl px-4 py-2 text-xs sm:text-sm font-semibold transition-all cursor-pointer ${
+                  listingsSubTab === "history"
+                    ? "bg-primary text-primary-foreground shadow-sm"
+                    : "bg-muted/70 text-muted-foreground hover:bg-muted hover:text-foreground"
+                }`}
+              >
+                <History className="h-4 w-4" />
+                <span>Rental History</span>
+                <Badge
+                  variant={listingsSubTab === "history" ? "secondary" : "outline"}
+                  className="ml-1 text-[11px] px-1.5 py-0 h-4"
+                >
+                  {rentalHistory.length}
+                </Badge>
+              </button>
             </div>
 
-            {incomingBookings.length > 0 ? (
-              <div className="grid grid-cols-1 gap-4">
-                {incomingBookings.map((request) => {
-                  const listing = request.listing;
-                  const photo =
-                    (listing?.listing_images?.[0] as { url?: string; image_url?: string } | undefined)?.url ||
-                    listing?.listing_images?.[0]?.image_url ||
-                    listing?.images?.[0];
+            <Link href="/listings/new">
+              <Button size="sm" className="font-semibold shadow-sm self-start sm:self-auto">
+                <Plus className="mr-1.5 h-4 w-4" />
+                List New Item
+              </Button>
+            </Link>
+          </div>
 
-                  const isPending = request.status === "pending";
-                  const isActionLoading = Boolean(loadingActions[request.id]);
+          {/* ── Sub-view A: Active Listings ── */}
+          {listingsSubTab === "active" && (
+            <div className="space-y-6">
+              {/* Incoming Booking Requests (if any pending/active incoming requests) */}
+              {incomingBookings.length > 0 && (
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <h3 className="font-heading text-base sm:text-lg font-bold text-foreground flex items-center gap-2">
+                        Incoming Rental Requests
+                        {pendingIncomingCount > 0 && (
+                          <Badge className="bg-amber-500 text-white text-xs">
+                            {pendingIncomingCount} Action Required
+                          </Badge>
+                        )}
+                      </h3>
+                      <p className="text-xs text-muted-foreground">
+                        Review and accept or decline reservation requests for your listed units.
+                      </p>
+                    </div>
+                  </div>
 
-                  return (
-                    <Card
-                      key={request.id}
-                      className={`overflow-hidden rounded-2xl border p-4 sm:p-5 transition-all ${
-                        isPending
-                          ? "border-amber-500/40 bg-card shadow-md"
-                          : "border-border/80 bg-card/60"
-                      }`}
-                    >
-                      <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
-                        {/* Unit & Renter Info */}
-                        <div className="flex items-start gap-4">
-                          <div className="relative h-20 w-24 sm:h-24 sm:w-32 shrink-0 overflow-hidden rounded-xl bg-muted border border-border/60">
-                            {photo ? (
-                              <Image
-                                src={photo}
-                                alt={listing?.title || "Listing unit"}
-                                fill
-                                className="object-cover"
-                              />
-                            ) : (
-                              <div className="flex h-full w-full items-center justify-center text-muted-foreground">
-                                <ImageIcon className="h-6 w-6 stroke-[1.5]" />
-                              </div>
-                            )}
-                          </div>
+                  <div className="grid grid-cols-1 gap-3">
+                    {incomingBookings.map((request) => {
+                      const listing = request.listing;
+                      const photo =
+                        (listing?.listing_images?.[0] as { url?: string; image_url?: string } | undefined)?.url ||
+                        listing?.listing_images?.[0]?.image_url ||
+                        listing?.images?.[0];
 
-                          <div>
-                            <div className="flex items-center gap-2">
-                              <span className="text-xs font-semibold text-primary uppercase tracking-wider">
-                                {listing?.category?.name || "Equipment"}
-                              </span>
-                              <span className="text-muted-foreground/60">•</span>
-                              <span className="text-xs text-muted-foreground font-mono">
-                                Renter: {request.renter_id}
-                              </span>
-                            </div>
+                      const isPending = request.status === "pending";
+                      const isActionLoading = Boolean(loadingActions[request.id]);
 
-                            <h3 className="font-heading text-base sm:text-lg font-bold text-foreground mt-0.5">
-                              {listing?.title || "Listed Unit"}
-                            </h3>
-
-                            <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
-                              <div className="flex items-center gap-1.5">
-                                <Calendar className="h-3.5 w-3.5 text-muted-foreground" />
-                                <span className="font-medium text-foreground">
-                                  {format(parseISO(request.start_date), "MMM dd, yyyy")} → {format(parseISO(request.end_date), "MMM dd, yyyy")}
-                                </span>
-                                <span className="text-[11px] text-muted-foreground">
-                                  ({calculateInclusiveRentalDays(request.start_date, request.end_date)}{" "}
-                                  {calculateInclusiveRentalDays(request.start_date, request.end_date) === 1 ? "day" : "days"})
-                                </span>
-                              </div>
-
-                              <div className="font-bold text-foreground">
-                                Payout Estimate: {formatCurrency(request.total_price)}
-                              </div>
-                            </div>
-                          </div>
-                        </div>
-
-                        {/* Actions (Accept / Decline) & Status */}
-                        <div className="flex flex-row lg:flex-col items-center lg:items-end justify-between lg:justify-center gap-3 pt-3 lg:pt-0 border-t lg:border-t-0 border-border/60">
-                          {renderStatusBadge(request.status)}
-
-                          {isPending ? (
-                            <div className="flex items-center gap-2">
-                              <Button
-                                type="button"
-                                size="sm"
-                                disabled={isActionLoading}
-                                onClick={() => handleAcceptRequest(request.id)}
-                                className="bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-xs shadow-sm cursor-pointer"
-                              >
-                                {isActionLoading ? (
-                                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      return (
+                        <Card
+                          key={request.id}
+                          className={`overflow-hidden rounded-2xl border p-4 transition-all ${
+                            isPending
+                              ? "border-amber-500/40 bg-card shadow-sm"
+                              : "border-border/80 bg-card/60"
+                          }`}
+                        >
+                          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+                            <div className="flex items-start gap-4">
+                              <div className="relative h-16 w-20 sm:h-20 sm:w-28 shrink-0 overflow-hidden rounded-xl bg-muted border border-border/60">
+                                {photo ? (
+                                  <Image
+                                    src={photo}
+                                    alt={listing?.title || "Listing unit"}
+                                    fill
+                                    className="object-cover"
+                                  />
                                 ) : (
-                                  <>
-                                    <CheckCircle2 className="mr-1 h-3.5 w-3.5" />
-                                    Accept
-                                  </>
+                                  <div className="flex h-full w-full items-center justify-center text-muted-foreground">
+                                    <ImageIcon className="h-5 w-5 stroke-[1.5]" />
+                                  </div>
                                 )}
-                              </Button>
+                              </div>
+
+                              <div>
+                                <div className="flex items-center gap-2">
+                                  <span className="text-xs font-semibold text-primary uppercase tracking-wider">
+                                    {listing?.category?.name || "Equipment"}
+                                  </span>
+                                  <span className="text-muted-foreground/60">•</span>
+                                  <span className="text-xs text-muted-foreground font-mono">
+                                    Renter: {request.renter_id}
+                                  </span>
+                                </div>
+
+                                <h4 className="font-heading text-base font-bold text-foreground mt-0.5 line-clamp-1">
+                                  {listing?.title || "Listed Unit"}
+                                </h4>
+
+                                <div className="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
+                                  <div className="flex items-center gap-1.5">
+                                    <Calendar className="h-3.5 w-3.5 text-muted-foreground" />
+                                    <span className="font-medium text-foreground">
+                                      {format(parseISO(request.start_date), "MMM dd, yyyy")} → {format(parseISO(request.end_date), "MMM dd, yyyy")}
+                                    </span>
+                                  </div>
+
+                                  <div className="font-bold text-foreground">
+                                    Payout: {formatCurrency(request.total_price)}
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+
+                            <div className="flex flex-row lg:flex-col items-center lg:items-end justify-between lg:justify-center gap-3 pt-3 lg:pt-0 border-t lg:border-t-0 border-border/60">
+                              {renderStatusBadge(request.status)}
+
+                              {isPending && (
+                                <div className="flex items-center gap-2">
+                                  <Button
+                                    type="button"
+                                    size="sm"
+                                    disabled={isActionLoading}
+                                    onClick={() => handleAcceptRequest(request.id)}
+                                    className="bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-xs shadow-sm cursor-pointer h-7"
+                                  >
+                                    {isActionLoading ? (
+                                      <Loader2 className="h-3 w-3 animate-spin" />
+                                    ) : (
+                                      <>
+                                        <CheckCircle2 className="mr-1 h-3 w-3" />
+                                        Accept
+                                      </>
+                                    )}
+                                  </Button>
+
+                                  <Button
+                                    type="button"
+                                    variant="outline"
+                                    size="sm"
+                                    disabled={isActionLoading}
+                                    onClick={() => handleDeclineRequest(request.id)}
+                                    className="border-destructive/40 text-destructive hover:bg-destructive/10 text-xs font-semibold cursor-pointer h-7"
+                                  >
+                                    {isActionLoading ? (
+                                      <Loader2 className="h-3 w-3 animate-spin" />
+                                    ) : (
+                                      <>
+                                        <XCircle className="mr-1 h-3 w-3" />
+                                        Decline
+                                      </>
+                                    )}
+                                  </Button>
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        </Card>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* Active Listings Grid */}
+              <div className="space-y-4">
+                <div>
+                  <h3 className="font-heading text-base sm:text-lg font-bold text-foreground">
+                    Your Listed Items
+                  </h3>
+                  <p className="text-xs text-muted-foreground">
+                    Items active, reserved, or configured in your rental catalog.
+                  </p>
+                </div>
+
+                {listings.length > 0 ? (
+                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                    {listings.map((item) => {
+                      const photo =
+                        (item.listing_images?.[0] as { url?: string; image_url?: string } | undefined)?.url ||
+                        item.listing_images?.[0]?.image_url ||
+                        item.images?.[0];
+
+                      const stateInfo = getListingStateInfo(item);
+                      const isActionLoading = Boolean(loadingActions[item.id]);
+
+                      return (
+                        <Card
+                          key={item.id}
+                          className="overflow-hidden rounded-2xl border border-border/80 bg-card transition-all hover:border-primary/40 hover:shadow-md flex flex-col justify-between"
+                        >
+                          <div>
+                            <div className="relative aspect-[16/10] w-full bg-muted">
+                              {photo ? (
+                                <Image
+                                  src={photo}
+                                  alt={item.title}
+                                  fill
+                                  className="object-cover"
+                                />
+                              ) : (
+                                <div className="flex h-full w-full items-center justify-center text-muted-foreground">
+                                  <ImageIcon className="h-6 w-6 stroke-[1.5]" />
+                                </div>
+                              )}
+
+                              <div className="absolute top-2.5 left-2.5">
+                                <Badge variant="secondary" className="text-xs font-semibold backdrop-blur-sm bg-background/90">
+                                  {item.category?.name || "Category"}
+                                </Badge>
+                              </div>
+
+                              <div className="absolute top-2.5 right-2.5">
+                                {stateInfo.badge}
+                              </div>
+                            </div>
+
+                            <div className="p-4">
+                              <h4 className="font-heading text-base font-bold text-foreground line-clamp-1">
+                                {item.title}
+                              </h4>
+                              <p className="text-xs text-muted-foreground mt-0.5 truncate">
+                                {item.location}
+                              </p>
+                            </div>
+                          </div>
+
+                          <div className="flex flex-col gap-2 border-t border-border/60 p-4 pt-3 bg-muted/10">
+                            <div className="flex items-center justify-between">
+                              <span className="font-bold text-foreground text-sm">
+                                {formatCurrency(item.price_per_day)}{" "}
+                                <span className="text-xs font-normal text-muted-foreground">/ day</span>
+                              </span>
+
+                              <div className="flex items-center gap-1">
+                                <Link href={`/listings/${item.id}`}>
+                                  <Button variant="ghost" size="sm" className="h-7 text-xs font-semibold px-2">
+                                    View
+                                    <ExternalLink className="ml-1 h-3 w-3" />
+                                  </Button>
+                                </Link>
+
+                                <Button
+                                  type="button"
+                                  variant="ghost"
+                                  size="sm"
+                                  disabled={isActionLoading}
+                                  onClick={() => handleDeleteListing(item.id)}
+                                  className="h-7 text-xs font-semibold text-destructive hover:bg-destructive/10 hover:text-destructive cursor-pointer px-2"
+                                  aria-label="Delete listing"
+                                >
+                                  <Trash2 className="h-3.5 w-3.5" />
+                                </Button>
+                              </div>
+                            </div>
+
+                            {/* Authoritative Availability Toggle Button */}
+                            <div className="pt-2 border-t border-border/40 flex items-center justify-between text-xs">
+                              <span className="text-muted-foreground">
+                                Status: <strong className="text-foreground">{stateInfo.label}</strong>
+                              </span>
 
                               <Button
                                 type="button"
                                 variant="outline"
                                 size="sm"
                                 disabled={isActionLoading}
-                                onClick={() => handleDeclineRequest(request.id)}
-                                className="border-destructive/40 text-destructive hover:bg-destructive/10 text-xs font-semibold cursor-pointer"
+                                onClick={() => handleToggleAvailability(item.id)}
+                                className={`h-7 text-xs font-semibold cursor-pointer ${
+                                  item.status === "available"
+                                    ? "border-amber-500/40 text-amber-600 hover:bg-amber-500/10"
+                                    : "border-emerald-600/40 text-emerald-600 hover:bg-emerald-600/10"
+                                }`}
                               >
                                 {isActionLoading ? (
-                                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                  <Loader2 className="h-3 w-3 animate-spin mr-1" />
                                 ) : (
-                                  <>
-                                    <XCircle className="mr-1 h-3.5 w-3.5" />
-                                    Decline
-                                  </>
+                                  <Power className="mr-1 h-3 w-3" />
                                 )}
+                                {item.status === "available" ? "Set Unavailable" : "Make Available"}
                               </Button>
                             </div>
-                          ) : (
-                            <span className="text-[11px] text-muted-foreground">
-                              {request.status === "accepted" && "Accepted reservation"}
-                              {request.status === "cancelled" && "Request declined"}
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                    </Card>
-                  );
-                })}
+                          </div>
+                        </Card>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <Card className="rounded-2xl border border-dashed border-border/80 bg-muted/20 p-12 text-center">
+                    <Layers className="mx-auto h-12 w-12 text-muted-foreground mb-3" />
+                    <h3 className="font-heading text-lg font-bold text-foreground">
+                      You don&apos;t have any active listings yet. List an item to start renting it out.
+                    </h3>
+                    <p className="mt-1 text-xs sm:text-sm text-muted-foreground max-w-sm mx-auto">
+                      Earn income by listing your property, cars, tech, tools, or special vehicles on the marketplace.
+                    </p>
+                    <Link href="/listings/new" className="mt-5 inline-block">
+                      <Button size="sm">
+                        <Plus className="mr-1.5 h-4 w-4" />
+                        List Your First Item
+                      </Button>
+                    </Link>
+                  </Card>
+                )}
               </div>
-            ) : (
-              <Card className="rounded-2xl border border-dashed border-border/80 bg-muted/20 p-8 text-center">
-                <Clock className="mx-auto h-9 w-9 text-muted-foreground mb-2" />
-                <h4 className="font-heading text-sm font-bold text-foreground">No incoming booking requests</h4>
-                <p className="mt-1 text-xs text-muted-foreground">
-                  When renters request your equipment, they will appear here for you to accept or decline.
-                </p>
-              </Card>
-            )}
-          </div>
-
-          {/* Section 2: My Listed Units */}
-          <div className="space-y-4 pt-4 border-t border-border/60">
-            <div className="flex items-center justify-between">
-              <div>
-                <h2 className="font-heading text-lg sm:text-xl font-bold text-foreground">
-                  Your Listed Equipment & Units
-                </h2>
-                <p className="text-xs text-muted-foreground">
-                  Inventory active or pending verification on the marketplace.
-                </p>
-              </div>
-
-              <Link href="/listings/new">
-                <Button size="sm" className="font-semibold shadow-sm">
-                  <Plus className="mr-1.5 h-4 w-4" />
-                  List New Item
-                </Button>
-              </Link>
             </div>
+          )}
 
-            {listings.length > 0 ? (
-              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                {listings.map((item) => {
-                  const photo =
-                    (item.listing_images?.[0] as { url?: string; image_url?: string } | undefined)?.url ||
-                    item.listing_images?.[0]?.image_url ||
-                    item.images?.[0];
-
-                  return (
-                    <Card
-                      key={item.id}
-                      className="overflow-hidden rounded-2xl border border-border/80 bg-card transition-all hover:border-primary/40 hover:shadow-md flex flex-col justify-between"
-                    >
-                      <div>
-                        <div className="relative aspect-[16/10] w-full bg-muted">
-                          {photo ? (
-                            <Image
-                              src={photo}
-                              alt={item.title}
-                              fill
-                              className="object-cover"
-                            />
-                          ) : (
-                            <div className="flex h-full w-full items-center justify-center text-muted-foreground">
-                              <ImageIcon className="h-6 w-6 stroke-[1.5]" />
-                            </div>
-                          )}
-
-                          <div className="absolute top-2.5 left-2.5">
-                            <Badge variant="secondary" className="text-xs font-semibold backdrop-blur-sm bg-background/90">
-                              {item.category?.name || "Equipment"}
-                            </Badge>
-                          </div>
-
-                          <div className="absolute top-2.5 right-2.5">
-                            {item.status === "pending_review" ? (
-                              <Badge className="bg-amber-500 text-white text-[10px] font-semibold">
-                                Pending Review
-                              </Badge>
-                            ) : (
-                              <Badge className="bg-emerald-600 text-white text-[10px] font-semibold">
-                                Available
-                              </Badge>
-                            )}
-                          </div>
-                        </div>
-
-                        <div className="p-4">
-                          <h3 className="font-heading text-base font-bold text-foreground line-clamp-1">
-                            {item.title}
-                          </h3>
-                          <p className="text-xs text-muted-foreground mt-0.5 truncate">
-                            {item.location}
-                          </p>
-                        </div>
-                      </div>
-
-                      <div className="flex items-center justify-between border-t border-border/60 p-4 pt-3 bg-muted/10">
-                        <span className="font-bold text-foreground text-sm">
-                          {formatCurrency(item.price_per_day)} <span className="text-xs font-normal text-muted-foreground">/ day</span>
-                        </span>
-
-                        <div className="flex items-center gap-1">
-                          <Link href={`/listings/${item.id}`}>
-                            <Button variant="ghost" size="sm" className="h-8 text-xs font-semibold">
-                              View
-                              <ExternalLink className="ml-1 h-3 w-3" />
-                            </Button>
-                          </Link>
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="sm"
-                            disabled={Boolean(loadingActions[item.id])}
-                            onClick={() => handleDeleteListing(item.id)}
-                            className="h-8 text-xs font-semibold text-destructive hover:bg-destructive/10 hover:text-destructive cursor-pointer"
-                          >
-                            <Trash2 className="h-3.5 w-3.5" />
-                          </Button>
-                        </div>
-                      </div>
-                    </Card>
-                  );
-                })}
-              </div>
-            ) : (
-              <Card className="rounded-2xl border border-dashed border-border/80 bg-muted/20 p-12 text-center">
-                <Layers className="mx-auto h-12 w-12 text-muted-foreground mb-3" />
-                <h3 className="font-heading text-lg font-bold text-foreground">You haven&apos;t listed any items yet</h3>
-                <p className="mt-1 text-xs sm:text-sm text-muted-foreground max-w-sm mx-auto">
-                  Earn income by renting out your machinery, vehicles, boats, and production gear.
+          {/* ── Sub-view B: Rental History ── */}
+          {listingsSubTab === "history" && (
+            <div className="space-y-4">
+              <div>
+                <h3 className="font-heading text-base sm:text-lg font-bold text-foreground">
+                  Completed Rental History
+                </h3>
+                <p className="text-xs text-muted-foreground">
+                  Past completed rentals for your listed items. Completed items remain reusable in your active inventory.
                 </p>
-                <Link href="/listings/new" className="mt-5 inline-block">
-                  <Button size="sm">
-                    <Plus className="mr-1.5 h-4 w-4" />
-                    List Your First Item
-                  </Button>
-                </Link>
-              </Card>
-            )}
-          </div>
+              </div>
+
+              {rentalHistory.length > 0 ? (
+                <div className="grid grid-cols-1 gap-4">
+                  {rentalHistory.map((item) => {
+                    const listing = item.listing;
+                    const photo =
+                      (listing?.listing_images?.[0] as { url?: string; image_url?: string } | undefined)?.url ||
+                      listing?.listing_images?.[0]?.image_url ||
+                      listing?.images?.[0];
+
+                    const completedDate = item.end_date || item.created_at;
+
+                    return (
+                      <Card
+                        key={item.id}
+                        className="overflow-hidden rounded-2xl border border-border/80 bg-card p-4 sm:p-5 transition-all hover:border-border"
+                      >
+                        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                          <div className="flex items-start gap-4">
+                            <div className="relative h-20 w-24 sm:h-24 sm:w-32 shrink-0 overflow-hidden rounded-xl bg-muted border border-border/60">
+                              {photo ? (
+                                <Image
+                                  src={photo}
+                                  alt={listing?.title || "Rental unit"}
+                                  fill
+                                  className="object-cover"
+                                />
+                              ) : (
+                                <div className="flex h-full w-full items-center justify-center text-muted-foreground">
+                                  <ImageIcon className="h-6 w-6 stroke-[1.5]" />
+                                </div>
+                              )}
+                            </div>
+
+                            <div>
+                              <div className="flex items-center gap-2">
+                                <span className="text-xs font-semibold text-primary uppercase tracking-wider">
+                                  {listing?.category?.name || "Equipment"}
+                                </span>
+                                <span className="text-muted-foreground/60">•</span>
+                                <span className="text-xs text-muted-foreground font-mono">
+                                  Renter ID: {item.renter_id}
+                                </span>
+                              </div>
+
+                              <Link href={`/listings/${item.listing_id}`}>
+                                <h4 className="font-heading text-base sm:text-lg font-bold text-foreground mt-0.5 hover:text-primary transition-colors line-clamp-1">
+                                  {listing?.title || "Rental Listing"}
+                                </h4>
+                              </Link>
+
+                              <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
+                                <div className="flex items-center gap-1.5">
+                                  <Calendar className="h-3.5 w-3.5 text-muted-foreground" />
+                                  <span className="font-medium text-foreground">
+                                    {format(parseISO(item.start_date), "MMM dd, yyyy")} → {format(parseISO(item.end_date), "MMM dd, yyyy")}
+                                  </span>
+                                  <span className="text-[11px] text-muted-foreground">
+                                    ({calculateInclusiveRentalDays(item.start_date, item.end_date)}{" "}
+                                    {calculateInclusiveRentalDays(item.start_date, item.end_date) === 1 ? "day" : "days"})
+                                  </span>
+                                </div>
+
+                                <div className="flex items-center gap-1.5">
+                                  <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" />
+                                  <span>
+                                    Completed: {format(parseISO(completedDate), "MMM dd, yyyy")}
+                                  </span>
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="flex flex-row md:flex-col items-center md:items-end justify-between md:justify-center gap-3 pt-3 md:pt-0 border-t md:border-t-0 border-border/60">
+                            <div className="text-left md:text-right">
+                              <span className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider block">
+                                Total Payout
+                              </span>
+                              <span className="text-base sm:text-lg font-extrabold text-foreground">
+                                {formatCurrency(item.total_price)}
+                              </span>
+                            </div>
+
+                            <div className="flex items-center gap-2">
+                              {renderStatusBadge(item.status)}
+                              <Badge variant="outline" className="text-[10px] text-muted-foreground border-border/60">
+                                Reusable Listing
+                              </Badge>
+                            </div>
+                          </div>
+                        </div>
+                      </Card>
+                    );
+                  })}
+                </div>
+              ) : (
+                <Card className="rounded-2xl border border-dashed border-border/80 bg-muted/20 p-12 text-center">
+                  <History className="mx-auto h-12 w-12 text-muted-foreground mb-3" />
+                  <h3 className="font-heading text-lg font-bold text-foreground">
+                    No completed rentals yet. Your completed rentals will appear here.
+                  </h3>
+                  <p className="mt-1 text-xs sm:text-sm text-muted-foreground max-w-sm mx-auto">
+                    When renters conclude their reservation period and return your equipment, the history record will be tracked here.
+                  </p>
+                </Card>
+              )}
+            </div>
+          )}
         </div>
       )}
 

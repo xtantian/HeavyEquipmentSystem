@@ -3,6 +3,7 @@ import { ListingRow, CategoryRow, ListingImageRow } from "@/lib/supabase/types";
 export interface MarketplaceListingItem extends ListingRow {
   category?: CategoryRow | null;
   listing_images?: (ListingImageRow & { url?: string })[];
+  has_active_reservation?: boolean;
 }
 
 export const MOCK_LISTINGS: MarketplaceListingItem[] = [

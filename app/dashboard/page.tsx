@@ -17,8 +17,8 @@ export default async function DashboardPage() {
     redirect("/sign-in?redirect_url=/dashboard");
   }
 
-  // 2. Fetch user's rentals, listings, and incoming booking requests
-  const [rentals, { listings, incomingBookings }] = await Promise.all([
+  // 2. Fetch user's rentals, listings, incoming booking requests, and rental history
+  const [rentals, { listings, incomingBookings, rentalHistory }] = await Promise.all([
     getUserRentals(userId),
     getUserListingsAndIncoming(userId),
   ]);
@@ -44,6 +44,7 @@ export default async function DashboardPage() {
             initialRentals={rentals}
             initialListings={listings}
             initialIncomingBookings={incomingBookings}
+            initialRentalHistory={rentalHistory}
             userId={userId}
           />
         </div>

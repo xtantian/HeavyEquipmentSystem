@@ -195,3 +195,72 @@ export async function deleteUserListingAction(listingId: string) {
     return { error: (err as Error).message || "Failed to delete listing" };
   }
 }
+
+/**
+ * Authoritative Server Action for toggling a user's listing availability.
+ * Toggles status between 'available' and 'inactive' (Not Available) with strict ownership checks.
+ */
+export async function toggleListingAvailabilityAction(listingId: string) {
+  const { userId } = await auth();
+  if (!userId) {
+    return {
+      error: "You must be signed in to perform this action.",
+      code: "AUTH_REQUIRED",
+    };
+  }
+
+  try {
+    const supabase = await createSupabaseServerClient();
+    const user = await currentUser();
+    let isAdmin = user?.publicMetadata?.role === "admin";
+    if (!isAdmin) {
+      const { data: profile } = await supabase
+        .from("profiles")
+        .select("role")
+        .eq("clerk_user_id", userId)
+        .maybeSingle();
+      if (profile?.role === "admin") {
+        isAdmin = true;
+      }
+    }
+
+    // Verify listing ownership
+    const { data: listing, error: fetchError } = await supabase
+      .from("listings")
+      .select("id, owner_id, status")
+      .eq("id", listingId)
+      .maybeSingle();
+
+    if (fetchError || !listing) {
+      return { error: "Listing not found." };
+    }
+
+    if (listing.owner_id !== userId && !isAdmin) {
+      return { error: "Unauthorized: You do not own this listing." };
+    }
+
+    // Toggle: if currently available, switch to 'inactive' (Not Available); otherwise switch to 'available'
+    const newStatus = listing.status === "available" ? "inactive" : "available";
+
+    const { error: updateError } = await supabase
+      .from("listings")
+      .update({
+        status: newStatus,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", listingId);
+
+    if (updateError) {
+      return { error: updateError.message };
+    }
+
+    revalidatePath("/dashboard");
+    revalidatePath("/listings");
+    revalidatePath(`/listings/${listingId}`);
+
+    return { success: true, newStatus };
+  } catch (err: unknown) {
+    return { error: (err as Error).message || "Failed to toggle listing availability." };
+  }
+}
+

@@ -147,16 +147,33 @@ export async function getMarketplaceListings(
 
     const { data, error } = await query.order("created_at", { ascending: false });
 
-    console.log("[select listings]", { data, error });
+    console.log("[select listings]", { count: data?.length, error });
 
-    if (!error && data && data.length > 0) {
-      return data as unknown as MarketplaceListingItem[];
+    if (!error && data) {
+      let results = data as unknown as MarketplaceListingItem[];
+      if (results.length > 0) {
+        const listingIds = results.map((l) => l.id);
+        const { data: activeBookings } = await supabase
+          .from("bookings")
+          .select("listing_id, status")
+          .in("listing_id", listingIds)
+          .in("status", [...RESERVATION_BLOCKING_STATUSES]);
+
+        if (activeBookings && activeBookings.length > 0) {
+          const reservedSet = new Set(activeBookings.map((b) => b.listing_id));
+          results = results.map((item) => ({
+            ...item,
+            has_active_reservation: reservedSet.has(item.id),
+          }));
+        }
+      }
+      return results;
     }
   } catch (err) {
     console.error("[supabase/marketplace] Error fetching listings:", err);
   }
 
-  // Graceful fallback to mock listings
+  // Graceful fallback to mock listings only if database is completely unavailable
   return filterMockListings(options);
 }
 
@@ -358,9 +375,11 @@ export async function getUserRentals(userId: string): Promise<DashboardBookingIt
 export async function getUserListingsAndIncoming(userId: string): Promise<{
   listings: MarketplaceListingItem[];
   incomingBookings: DashboardBookingItem[];
+  rentalHistory: DashboardBookingItem[];
 }> {
   let listings: MarketplaceListingItem[] = [];
   let incomingBookings: DashboardBookingItem[] = [];
+  let rentalHistory: DashboardBookingItem[] = [];
 
   try {
     const supabase = await createSupabaseServerClient();
@@ -383,7 +402,7 @@ export async function getUserListingsAndIncoming(userId: string): Promise<{
       console.warn("[supabase] Error fetching user listings:", listError.message);
     }
 
-    // 2. Fetch incoming bookings for these listings
+    // 2. Fetch all bookings for these listings
     if (listings.length > 0) {
       const listingIds = listings.map((l) => l.id);
       const { data: bkData, error: bkError } = await supabase
@@ -400,14 +419,31 @@ export async function getUserListingsAndIncoming(userId: string): Promise<{
         .order("created_at", { ascending: false });
 
       if (!bkError && bkData) {
-        incomingBookings = bkData as unknown as DashboardBookingItem[];
+        const allBookings = bkData as unknown as DashboardBookingItem[];
+        // Active / pending booking requests (holding or requesting unit)
+        incomingBookings = allBookings.filter((b) =>
+          ["pending", "accepted", "paid", "active"].includes(b.status)
+        );
+        // Completed rental history records
+        rentalHistory = allBookings.filter((b) =>
+          ["completed", "returned"].includes(b.status)
+        );
+
+        // Compute active reservation presence for each listing
+        const activeReservedListingIds = new Set(
+          incomingBookings.map((b) => b.listing_id)
+        );
+        listings = listings.map((l) => ({
+          ...l,
+          has_active_reservation: activeReservedListingIds.has(l.id),
+        }));
       } else if (bkError) {
-        console.warn("[supabase] Error fetching incoming bookings:", bkError.message);
+        console.warn("[supabase] Error fetching bookings for user listings:", bkError.message);
       }
     }
   } catch (err) {
     console.warn("[supabase] Error fetching user listings and incoming bookings:", err);
   }
 
-  return { listings, incomingBookings };
+  return { listings, incomingBookings, rentalHistory };
 }

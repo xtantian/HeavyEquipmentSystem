@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { ArrowLeft, MapPin, ShieldCheck, Sparkles, CheckCircle2 } from "lucide-react";
+import { ArrowLeft, MapPin, ShieldCheck } from "lucide-react";
 import { Navbar } from "@/components/landing/navbar";
 import { Footer } from "@/components/landing/footer";
 import { Badge } from "@/components/ui/badge";
@@ -170,6 +170,7 @@ export default async function ListingDetailPage({ params }: ListingDetailPagePro
                 depositAmount={depositAmount}
                 ownerId={listing.owner_id}
                 bookedRanges={bookedRanges}
+                listingStatus={listing.status}
               />
             </div>
           </div>
