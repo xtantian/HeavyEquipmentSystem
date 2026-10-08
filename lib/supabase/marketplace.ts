@@ -300,6 +300,7 @@ export interface DashboardBookingItem {
   status: "pending" | "accepted" | "paid" | "active" | "returned" | "completed" | "cancelled";
   created_at: string;
   listing?: MarketplaceListingItem | null;
+  is_reviewed?: boolean;
 }
 
 export async function getUserRentals(userId: string): Promise<DashboardBookingItem[]> {
@@ -319,7 +320,30 @@ export async function getUserRentals(userId: string): Promise<DashboardBookingIt
       .order("created_at", { ascending: false });
 
     if (!error && data) {
-      return data as unknown as DashboardBookingItem[];
+      // Check which completed/returned bookings have already been reviewed
+      const completedBookingIds = data
+        .filter((b) => b.status === "completed" || b.status === "returned")
+        .map((b) => b.id);
+
+      const reviewedSet = new Set<string>();
+      if (completedBookingIds.length > 0) {
+        const { data: revData } = await supabase
+          .from("lister_reviews")
+          .select("booking_id")
+          .in("booking_id", completedBookingIds)
+          .eq("reviewer_id", userId);
+
+        if (revData) {
+          for (const r of revData) {
+            reviewedSet.add(r.booking_id);
+          }
+        }
+      }
+
+      return data.map((b) => ({
+        ...(b as unknown as DashboardBookingItem),
+        is_reviewed: reviewedSet.has(b.id),
+      }));
     }
     if (error) {
       console.warn("[supabase] Error fetching user rentals:", error.message);

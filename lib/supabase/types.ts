@@ -507,6 +507,52 @@ export interface Database {
       };
 
       /**
+       * lister_reviews
+       * Reputation ratings and reviews for equipment listers/hosts
+       */
+      lister_reviews: {
+        Row: {
+          id: string;
+          reviewer_id: string;
+          lister_id: string;
+          booking_id: string;
+          rating: number;
+          comment: string | null;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          reviewer_id: string;
+          lister_id: string;
+          booking_id: string;
+          rating: number;
+          comment?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          id?: string;
+          reviewer_id?: string;
+          lister_id?: string;
+          booking_id?: string;
+          rating?: number;
+          comment?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "lister_reviews_booking_id_fkey";
+            columns: ["booking_id"];
+            isOneToOne: false;
+            referencedRelation: "bookings";
+            referencedColumns: ["id"];
+          }
+        ];
+      };
+
+      /**
        * listing_images
        * Gallery images for marketplace listings
        */

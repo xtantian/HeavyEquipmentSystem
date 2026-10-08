@@ -281,6 +281,210 @@ assert(!isListingAvailableToBook("maintenance"), "'maintenance' listing cannot b
 assert(!isListingAvailableToBook("restricted"), "'restricted' listing cannot be booked");
 assert(!isListingAvailableToBook("deleted"), "'deleted' listing cannot be booked");
 
+// -----------------------------------------------------------------------------
+// 6. LISTER REVIEWS & RATINGS VALIDATION AND AUTHORIZATION
+// -----------------------------------------------------------------------------
+console.log("\n▶ SUITE 6: Lister Reviews & Ratings Authorization & Integrity");
+
+function evaluateListerReviewEligibility({
+  callerId,
+  booking,
+  rating,
+  comment,
+  hasExistingReview,
+}) {
+  if (!callerId) {
+    return { allowed: false, reason: "AUTH_REQUIRED" };
+  }
+  if (!rating || typeof rating !== "number" || !Number.isInteger(rating) || rating < 1 || rating > 5) {
+    return { allowed: false, reason: "INVALID_RATING" };
+  }
+  if (comment && comment.length > 1000) {
+    return { allowed: false, reason: "COMMENT_TOO_LONG" };
+  }
+  if (!booking) {
+    return { allowed: false, reason: "BOOKING_NOT_FOUND" };
+  }
+  if (booking.renter_id !== callerId) {
+    return { allowed: false, reason: "NOT_RENTER" };
+  }
+  if (!["completed", "returned"].includes(booking.status)) {
+    return { allowed: false, reason: "BOOKING_NOT_COMPLETED" };
+  }
+  if (booking.listing_owner_id === callerId) {
+    return { allowed: false, reason: "SELF_REVIEW" };
+  }
+  if (hasExistingReview) {
+    return { allowed: false, reason: "ALREADY_REVIEWED" };
+  }
+  return { allowed: true };
+}
+
+const eligibleBooking = {
+  id: "booking_comp_1",
+  renter_id: "user_renter_1",
+  listing_owner_id: "user_lister_1",
+  status: "completed",
+};
+
+const returnedBooking = {
+  id: "booking_ret_1",
+  renter_id: "user_renter_1",
+  listing_owner_id: "user_lister_1",
+  status: "returned",
+};
+
+const pendingBooking = {
+  id: "booking_pend_1",
+  renter_id: "user_renter_1",
+  listing_owner_id: "user_lister_1",
+  status: "pending",
+};
+
+const activeBooking = {
+  id: "booking_act_1",
+  renter_id: "user_renter_1",
+  listing_owner_id: "user_lister_1",
+  status: "active",
+};
+
+// 1. Legitimate completed review
+assert(
+  evaluateListerReviewEligibility({
+    callerId: "user_renter_1",
+    booking: eligibleBooking,
+    rating: 5,
+    comment: "Excellent host and reliable equipment delivery.",
+    hasExistingReview: false,
+  }).allowed,
+  "Eligible renter can review host on completed rental"
+);
+
+// 2. Legitimate returned rental review
+assert(
+  evaluateListerReviewEligibility({
+    callerId: "user_renter_1",
+    booking: returnedBooking,
+    rating: 4,
+    comment: "Equipment returned on time, smooth handoff.",
+    hasExistingReview: false,
+  }).allowed,
+  "Eligible renter can review host on returned rental"
+);
+
+// 3. Unauthenticated rejection
+assert(
+  evaluateListerReviewEligibility({
+    callerId: null,
+    booking: eligibleBooking,
+    rating: 5,
+    hasExistingReview: false,
+  }).reason === "AUTH_REQUIRED",
+  "Unauthenticated caller rejected from submitting review"
+);
+
+// 4. Ineligible rental statuses rejected
+assert(
+  evaluateListerReviewEligibility({
+    callerId: "user_renter_1",
+    booking: pendingBooking,
+    rating: 5,
+    hasExistingReview: false,
+  }).reason === "BOOKING_NOT_COMPLETED",
+  "Pending rental cannot be reviewed"
+);
+
+assert(
+  evaluateListerReviewEligibility({
+    callerId: "user_renter_1",
+    booking: activeBooking,
+    rating: 5,
+    hasExistingReview: false,
+  }).reason === "BOOKING_NOT_COMPLETED",
+  "Active ongoing rental cannot be reviewed until completed/returned"
+);
+
+// 5. IDOR prevention: Third-party user cannot review someone else's booking
+assert(
+  evaluateListerReviewEligibility({
+    callerId: "user_stranger_99",
+    booking: eligibleBooking,
+    rating: 5,
+    hasExistingReview: false,
+  }).reason === "NOT_RENTER",
+  "User cannot review another renter's booking (IDOR prevented)"
+);
+
+// 6. Anti-abuse: Self-review rejected
+assert(
+  evaluateListerReviewEligibility({
+    callerId: "user_lister_1",
+    booking: {
+      ...eligibleBooking,
+      renter_id: "user_lister_1",
+      listing_owner_id: "user_lister_1",
+    },
+    rating: 5,
+    hasExistingReview: false,
+  }).reason === "SELF_REVIEW",
+  "Lister cannot review themselves (Self-review rejected)"
+);
+
+// 7. Duplicate review prevented
+assert(
+  evaluateListerReviewEligibility({
+    callerId: "user_renter_1",
+    booking: eligibleBooking,
+    rating: 5,
+    hasExistingReview: true,
+  }).reason === "ALREADY_REVIEWED",
+  "Duplicate review for same booking rejected"
+);
+
+// 8. Rating validation (1-5 only)
+assert(
+  evaluateListerReviewEligibility({
+    callerId: "user_renter_1",
+    booking: eligibleBooking,
+    rating: 0,
+    hasExistingReview: false,
+  }).reason === "INVALID_RATING",
+  "Rating of 0 rejected"
+);
+
+assert(
+  evaluateListerReviewEligibility({
+    callerId: "user_renter_1",
+    booking: eligibleBooking,
+    rating: 6,
+    hasExistingReview: false,
+  }).reason === "INVALID_RATING",
+  "Rating of 6 rejected"
+);
+
+assert(
+  evaluateListerReviewEligibility({
+    callerId: "user_renter_1",
+    booking: eligibleBooking,
+    rating: 4.5,
+    hasExistingReview: false,
+  }).reason === "INVALID_RATING",
+  "Decimal rating rejected (must be integer 1-5)"
+);
+
+// 9. Comment length validation
+const tooLongComment = "a".repeat(1001);
+assert(
+  evaluateListerReviewEligibility({
+    callerId: "user_renter_1",
+    booking: eligibleBooking,
+    rating: 5,
+    comment: tooLongComment,
+    hasExistingReview: false,
+  }).reason === "COMMENT_TOO_LONG",
+  "Comment exceeding 1000 characters rejected"
+);
+
 console.log("\n===============================================================================");
 console.log(`SUMMARY: ${passedTests}/${totalTests} Tests Passed (${failedTests} Failed)`);
 console.log("===============================================================================");

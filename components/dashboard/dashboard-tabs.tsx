@@ -20,6 +20,7 @@ import {
   Loader2,
   Image as ImageIcon,
   Trash2,
+  Star,
 } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -28,6 +29,7 @@ import { formatCurrency, calculateInclusiveRentalDays } from "@/lib/utils";
 import type { DashboardBookingItem } from "@/lib/supabase/marketplace";
 import type { MarketplaceListingItem } from "@/lib/marketplace/mock-listings";
 import { updateBookingStatusAction, deleteUserListingAction } from "@/app/dashboard/actions";
+import { WriteListerReviewModal } from "@/components/reviews/write-lister-review-modal";
 
 interface DashboardTabsProps {
   initialRentals: DashboardBookingItem[];
@@ -48,6 +50,12 @@ export function DashboardTabs({
   const [rentals, setRentals] = React.useState<DashboardBookingItem[]>(initialRentals);
   const [incomingBookings, setIncomingBookings] = React.useState<DashboardBookingItem[]>(initialIncomingBookings);
   const [listings, setListings] = React.useState<MarketplaceListingItem[]>(initialListings);
+
+  // Review modal state
+  const [reviewingBooking, setReviewingBooking] = React.useState<{
+    id: string;
+    listerName: string;
+  } | null>(null);
 
   // Loading indicator map for action buttons
   const [loadingActions, setLoadingActions] = React.useState<Record<string, boolean>>({});
@@ -369,6 +377,31 @@ export function DashboardTabs({
                       {/* Right: Status & Cancel Button */}
                       <div className="flex flex-row md:flex-col items-center md:items-end justify-between md:justify-center gap-3 pt-3 md:pt-0 border-t md:border-t-0 border-border/60">
                         {renderStatusBadge(booking.status)}
+
+                        {/* Review Host Action for eligible completed/returned rentals */}
+                        {(booking.status === "completed" || booking.status === "returned") && (
+                          booking.is_reviewed ? (
+                            <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-600 bg-emerald-500/10 px-2 py-1 rounded-md">
+                              <Star className="h-3 w-3 fill-emerald-600 text-emerald-600" />
+                              Review Submitted
+                            </span>
+                          ) : (
+                            <Button
+                              type="button"
+                              size="sm"
+                              onClick={() =>
+                                setReviewingBooking({
+                                  id: booking.id,
+                                  listerName: listing?.title ? `Host of ${listing.title}` : "Host",
+                                })
+                              }
+                              className="text-xs bg-amber-500 hover:bg-amber-600 text-white font-semibold cursor-pointer shadow-xs"
+                            >
+                              <Star className="mr-1.5 h-3.5 w-3.5 fill-white text-white" />
+                              Review Host
+                            </Button>
+                          )
+                        )}
 
                         {canCancel && (
                           <Button
@@ -698,6 +731,24 @@ export function DashboardTabs({
             )}
           </div>
         </div>
+      )}
+
+      {/* Write Lister Review Modal Dialog */}
+      {reviewingBooking && (
+        <WriteListerReviewModal
+          bookingId={reviewingBooking.id}
+          listerName={reviewingBooking.listerName}
+          isOpen={true}
+          onClose={() => setReviewingBooking(null)}
+          onSuccess={() => {
+            setRentals((prev) =>
+              prev.map((item) =>
+                item.id === reviewingBooking.id ? { ...item, is_reviewed: true } : item
+              )
+            );
+            showNotification("Review submitted successfully! Thank you for your feedback.", "success");
+          }}
+        />
       )}
     </div>
   );

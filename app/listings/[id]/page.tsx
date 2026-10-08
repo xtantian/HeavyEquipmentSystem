@@ -11,6 +11,11 @@ import {
   getMarketplaceListingById,
   getBookedRangesForListing,
 } from "@/lib/supabase/marketplace";
+import {
+  getPublicListerProfile,
+  getListerRatingSummary,
+} from "@/lib/supabase/lister-reviews";
+import { ListerProfileCard } from "@/components/reviews/lister-profile-card";
 
 interface ListingDetailPageProps {
   params: Promise<{ id: string }>;
@@ -26,6 +31,12 @@ export default async function ListingDetailPage({ params }: ListingDetailPagePro
   if (!listing) {
     notFound();
   }
+
+  // Fetch real database-backed lister profile and reviews summary using authoritative listing.owner_id
+  const [listerProfile, listerSummary] = await Promise.all([
+    getPublicListerProfile(listing.owner_id),
+    getListerRatingSummary(listing.owner_id),
+  ]);
 
   // Compile gallery images
   const galleryImages = [
@@ -84,6 +95,13 @@ export default async function ListingDetailPage({ params }: ListingDetailPagePro
                   <span>{listing.location}</span>
                 </div>
               </div>
+
+              {/* Lister / Host Profile Section */}
+              <ListerProfileCard
+                profile={listerProfile}
+                summary={listerSummary}
+                listerId={listing.owner_id}
+              />
 
               {/* Overview / Description */}
               <div className="rounded-2xl border border-border/80 bg-card p-6">
