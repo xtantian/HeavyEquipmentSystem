@@ -84,6 +84,36 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           (e) => e.id === user.primary_email_address_id
         )?.email_address ?? null;
 
+      // Check if user was securely invited as an administrator
+      const publicMeta = (user.public_metadata || {}) as Record<string, unknown>;
+      let assignedRole: "admin" | "customer" = "customer";
+
+      if (publicMeta.invitedAsAdmin === true || publicMeta.role === "admin") {
+        if (primaryEmail) {
+          const { data: inviteRecord } = await supabase
+            .from("admin_invitations")
+            .select("id, status")
+            .ilike("email", primaryEmail)
+            .eq("status", "pending")
+            .maybeSingle();
+
+          if (inviteRecord || publicMeta.invitedAsAdmin === true) {
+            assignedRole = "admin";
+            if (inviteRecord) {
+              await supabase
+                .from("admin_invitations")
+                .update({
+                  status: "accepted",
+                  accepted_at: new Date().toISOString(),
+                })
+                .eq("id", inviteRecord.id);
+            }
+          }
+        } else if (publicMeta.invitedAsAdmin === true) {
+          assignedRole = "admin";
+        }
+      }
+
       const { error } = await supabase.from("profiles").upsert(
         {
           clerk_user_id: user.id,
@@ -91,6 +121,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           first_name: user.first_name ?? null,
           last_name: user.last_name ?? null,
           avatar_url: user.image_url || null,
+          ...(assignedRole === "admin" ? { role: "admin" } : {}),
           // `updated_at` is managed by the DB trigger; explicit here for safety
           // on platforms that do not run triggers on upsert.
           updated_at: new Date().toISOString(),

@@ -38,11 +38,22 @@ export default async function ListingDetailPage({ params }: ListingDetailPagePro
     getListerRatingSummary(listing.owner_id),
   ]);
 
-  // Compile gallery images
+  // Compile gallery images — deduplicate by exact URL, preserving first-occurrence order.
+  // Root cause of the duplicate bug: images are stored in BOTH listings.images[] (text array)
+  // AND mirrored into the listing_images relation table during creation.
+  // We prefer listing_images (which carries sort_order) and fall back to the images[] column
+  // for any URLs not already included, then remove exact duplicates.
+  const seenUrls = new Set<string>();
   const galleryImages = [
     ...(listing.listing_images?.map((img) => img.image_url) || []),
     ...(listing.images || []),
-  ].filter(Boolean);
+  ]
+    .filter((url): url is string => Boolean(url))
+    .filter((url) => {
+      if (seenUrls.has(url)) return false;
+      seenUrls.add(url);
+      return true;
+    });
 
   const rawAttributes = (listing.attributes || {}) as Record<string, unknown>;
   const depositAmount = Number(rawAttributes.security_deposit) || Math.max(200, Math.round(listing.price_per_day * 1.5));

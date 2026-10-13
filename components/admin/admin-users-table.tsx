@@ -3,18 +3,12 @@
 import * as React from "react";
 import {
   Search,
-  UserCheck,
   AlertTriangle,
   UserX,
+  UserPlus,
   Trash2,
   RotateCcw,
   Eye,
-  ShieldAlert,
-  ShieldCheck,
-  Calendar,
-  Layers,
-  HardHat,
-  Filter,
   CheckCircle2,
   XCircle,
 } from "lucide-react";
@@ -22,6 +16,7 @@ import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
+import { AdminInvitationsDialog } from "@/components/admin/admin-invitations-dialog";
 import {
   Dialog,
   DialogContent,
@@ -43,6 +38,7 @@ export function AdminUsersTable({ initialUsers }: AdminUsersTableProps) {
   const [users, setUsers] = React.useState<AdminUserItem[]>(initialUsers);
   const [searchQuery, setSearchQuery] = React.useState("");
   const [statusFilter, setStatusFilter] = React.useState<string>("all");
+  const [inviteOpen, setInviteOpen] = React.useState(false);
 
   // Notification message
   const [notification, setNotification] = React.useState<{ text: string; type: "success" | "error" } | null>(null);
@@ -206,6 +202,15 @@ export function AdminUsersTable({ initialUsers }: AdminUsersTableProps) {
             <option value="banned">Banned</option>
             <option value="deleted">Deleted</option>
           </select>
+
+          <Button
+            type="button"
+            onClick={() => setInviteOpen(true)}
+            className="h-9 gap-1.5 rounded-lg bg-primary text-xs font-semibold text-primary-foreground shadow-sm hover:bg-primary/90"
+          >
+            <UserPlus className="h-3.5 w-3.5" />
+            Invite Administrator
+          </Button>
         </div>
       </div>
 
@@ -510,6 +515,11 @@ export function AdminUsersTable({ initialUsers }: AdminUsersTableProps) {
         reasonPlaceholder="e.g. Terms of Service violation, non-payment, or safety breach..."
         reasonValue={confirmDialog.reason}
         onReasonChange={(reason) => setConfirmDialog((prev) => ({ ...prev, reason }))}
+      />
+
+      <AdminInvitationsDialog
+        open={inviteOpen}
+        onOpenChange={setInviteOpen}
       />
     </div>
   );

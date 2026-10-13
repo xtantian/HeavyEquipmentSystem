@@ -10,11 +10,8 @@ import {
   RotateCcw,
   Trash2,
   AlertTriangle,
-  CheckCircle2,
-  Filter,
   ExternalLink,
   Image as ImageIcon,
-  Clock,
   Layers,
   Flag,
 } from "lucide-react";
@@ -75,6 +72,39 @@ export function AdminListingsTable({ initialListings }: AdminListingsTableProps)
     setTimeout(() => setNotification(null), 4000);
   };
 
+  // Identify potential historical duplicates (same owner, matching title+category or asset_identifier)
+  const potentialDuplicateIds = React.useMemo(() => {
+    const dupes = new Set<string>();
+    const byOwner: Record<string, MarketplaceListingItem[]> = {};
+    for (const item of listings) {
+      if (item.status === "deleted") continue;
+      const owner = item.owner_id || "unknown";
+      if (!byOwner[owner]) byOwner[owner] = [];
+      byOwner[owner].push(item);
+    }
+    for (const list of Object.values(byOwner)) {
+      if (list.length < 2) continue;
+      for (let i = 0; i < list.length; i++) {
+        for (let j = i + 1; j < list.length; j++) {
+          const a = list[i];
+          const b = list[j];
+          const aAsset = (a as unknown as { asset_identifier?: string })?.asset_identifier;
+          const bAsset = (b as unknown as { asset_identifier?: string })?.asset_identifier;
+          const sameAsset =
+            Boolean(aAsset && bAsset && aAsset.toLowerCase().trim() === bAsset.toLowerCase().trim());
+          const sameTitleAndCat =
+            a.title.toLowerCase().trim() === b.title.toLowerCase().trim() &&
+            a.category_id === b.category_id;
+          if (sameAsset || sameTitleAndCat) {
+            dupes.add(a.id);
+            dupes.add(b.id);
+          }
+        }
+      }
+    }
+    return dupes;
+  }, [listings]);
+
   // Filter listings
   const filteredListings = React.useMemo(() => {
     return listings.filter((item) => {
@@ -87,13 +117,15 @@ export function AdminListingsTable({ initialListings }: AdminListingsTableProps)
       let matchesStatus = true;
       if (statusFilter === "reported") {
         matchesStatus = Boolean(item.is_reported || item.report_reason);
+      } else if (statusFilter === "duplicates") {
+        matchesStatus = potentialDuplicateIds.has(item.id);
       } else if (statusFilter !== "all") {
         matchesStatus = item.status === statusFilter;
       }
 
       return matchesSearch && matchesStatus;
     });
-  }, [listings, searchQuery, statusFilter]);
+  }, [listings, searchQuery, statusFilter, potentialDuplicateIds]);
 
   // Execute confirmed actions
   const handleConfirmAction = async () => {
@@ -253,6 +285,7 @@ export function AdminListingsTable({ initialListings }: AdminListingsTableProps)
             <option value="available">Available</option>
             <option value="restricted">Restricted / Hidden</option>
             <option value="reported">Reported / Flagged</option>
+            <option value="duplicates">Potential Duplicates ({potentialDuplicateIds.size})</option>
             <option value="pending_review">Pending Review</option>
             <option value="rented">Rented</option>
             <option value="maintenance">Maintenance</option>
@@ -308,6 +341,12 @@ export function AdminListingsTable({ initialListings }: AdminListingsTableProps)
                           Owner: {item.owner_id ? `${item.owner_id.slice(0, 14)}...` : "System"}
                         </span>
                         {renderStatusBadge(item.status, isReported)}
+                        {potentialDuplicateIds.has(item.id) && (
+                          <Badge variant="outline" className="border-amber-500/40 bg-amber-500/10 text-amber-600 text-[10px] font-semibold gap-1">
+                            <AlertTriangle className="h-3 w-3" />
+                            Potential Duplicate Unit
+                          </Badge>
+                        )}
                       </div>
 
                       <h3 className="font-heading text-base sm:text-lg font-bold text-foreground">

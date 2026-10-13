@@ -63,6 +63,9 @@ export interface Database {
           role: UserRole;
           status: UserAccountStatus;
           phone?: string | null;
+          is_verified: boolean;
+          verified_at?: string | null;
+          verified_by?: string | null;
           created_at: string;
           updated_at: string;
         };
@@ -76,6 +79,9 @@ export interface Database {
           role?: UserRole;
           status?: UserAccountStatus;
           phone?: string | null;
+          is_verified?: boolean;
+          verified_at?: string | null;
+          verified_by?: string | null;
           created_at?: string;
           updated_at?: string;
         };
@@ -89,6 +95,9 @@ export interface Database {
           role?: UserRole;
           status?: UserAccountStatus;
           phone?: string | null;
+          is_verified?: boolean;
+          verified_at?: string | null;
+          verified_by?: string | null;
           created_at?: string;
           updated_at?: string;
         };
@@ -363,9 +372,14 @@ export interface Database {
           location: string;
           attributes: Json;
           status: ListingStatus;
+          asset_identifier?: string | null;
           is_reported?: boolean;
           report_reason?: string | null;
           deleted_at?: string | null;
+          is_verified?: boolean;
+          verified_at?: string | null;
+          verified_by?: string | null;
+          fulfillment_options?: string[];
           created_at: string;
           updated_at: string;
         };
@@ -380,9 +394,14 @@ export interface Database {
           location: string;
           attributes?: Json;
           status?: ListingStatus;
+          asset_identifier?: string | null;
           is_reported?: boolean;
           report_reason?: string | null;
           deleted_at?: string | null;
+          is_verified?: boolean;
+          verified_at?: string | null;
+          verified_by?: string | null;
+          fulfillment_options?: string[];
           created_at?: string;
           updated_at?: string;
         };
@@ -397,9 +416,14 @@ export interface Database {
           location?: string;
           attributes?: Json;
           status?: ListingStatus;
+          asset_identifier?: string | null;
           is_reported?: boolean;
           report_reason?: string | null;
           deleted_at?: string | null;
+          is_verified?: boolean;
+          verified_at?: string | null;
+          verified_by?: string | null;
+          fulfillment_options?: string[];
           created_at?: string;
           updated_at?: string;
         };
@@ -409,6 +433,41 @@ export interface Database {
             columns: ["category_id"];
             isOneToOne: false;
             referencedRelation: "categories";
+            referencedColumns: ["id"];
+          }
+        ];
+      };
+
+      /**
+       * saved_listings
+       * Persists each authenticated user's favorite/saved listings.
+       * user_id matches the Clerk user ID (auth.jwt() ->> 'sub').
+       */
+      saved_listings: {
+        Row: {
+          id: string;
+          user_id: string;
+          listing_id: string;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          user_id: string;
+          listing_id: string;
+          created_at?: string;
+        };
+        Update: {
+          id?: string;
+          user_id?: string;
+          listing_id?: string;
+          created_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "saved_listings_listing_id_fkey";
+            columns: ["listing_id"];
+            isOneToOne: false;
+            referencedRelation: "listings";
             referencedColumns: ["id"];
           }
         ];
@@ -427,6 +486,9 @@ export interface Database {
           end_date: string;
           total_price: number;
           status: BookingStatus;
+          fulfillment_method: string;
+          delivery_address?: string | null;
+          fulfillment_notes?: string | null;
           created_at: string;
           updated_at: string;
         };
@@ -438,6 +500,9 @@ export interface Database {
           end_date: string;
           total_price: number;
           status?: BookingStatus;
+          fulfillment_method?: string;
+          delivery_address?: string | null;
+          fulfillment_notes?: string | null;
           created_at?: string;
           updated_at?: string;
         };
@@ -449,6 +514,9 @@ export interface Database {
           end_date?: string;
           total_price?: number;
           status?: BookingStatus;
+          fulfillment_method?: string;
+          delivery_address?: string | null;
+          fulfillment_notes?: string | null;
           created_at?: string;
           updated_at?: string;
         };
@@ -667,6 +735,144 @@ export interface Database {
           target_type?: string;
           target_id?: string;
           details?: Json;
+          created_at?: string;
+        };
+        Relationships: [];
+      };
+      admin_invitations: {
+        Row: {
+          id: string;
+          clerk_invitation_id: string | null;
+          email: string;
+          invited_by: string;
+          status: "pending" | "accepted" | "revoked";
+          created_at: string;
+          accepted_at: string | null;
+          revoked_at: string | null;
+        };
+        Insert: {
+          id?: string;
+          clerk_invitation_id?: string | null;
+          email: string;
+          invited_by: string;
+          status?: "pending" | "accepted" | "revoked";
+          created_at?: string;
+          accepted_at?: string | null;
+          revoked_at?: string | null;
+        };
+        Update: {
+          id?: string;
+          clerk_invitation_id?: string | null;
+          email?: string;
+          invited_by?: string;
+          status?: "pending" | "accepted" | "revoked";
+          created_at?: string;
+          accepted_at?: string | null;
+          revoked_at?: string | null;
+        };
+        Relationships: [];
+      };
+
+      listing_verifications: {
+        Row: {
+          id: string;
+          listing_id: string;
+          owner_id: string;
+          status: "pending" | "approved" | "rejected";
+          verification_code: string;
+          evidence_photo_path: string | null;
+          asset_serial_hash: string | null;
+          admin_notes: string | null;
+          rejection_reason: string | null;
+          reviewed_by: string | null;
+          reviewed_at: string | null;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          listing_id: string;
+          owner_id?: string;
+          status?: "pending" | "approved" | "rejected";
+          verification_code?: string;
+          evidence_photo_path?: string | null;
+          asset_serial_hash?: string | null;
+          admin_notes?: string | null;
+          rejection_reason?: string | null;
+          reviewed_by?: string | null;
+          reviewed_at?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          id?: string;
+          listing_id?: string;
+          owner_id?: string;
+          status?: "pending" | "approved" | "rejected";
+          verification_code?: string;
+          evidence_photo_path?: string | null;
+          asset_serial_hash?: string | null;
+          admin_notes?: string | null;
+          rejection_reason?: string | null;
+          reviewed_by?: string | null;
+          reviewed_at?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Relationships: [];
+      };
+
+      conversations: {
+        Row: {
+          id: string;
+          booking_id: string;
+          renter_id: string;
+          owner_id: string;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          booking_id: string;
+          renter_id: string;
+          owner_id: string;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          id?: string;
+          booking_id?: string;
+          renter_id?: string;
+          owner_id?: string;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Relationships: [];
+      };
+
+      messages: {
+        Row: {
+          id: string;
+          conversation_id: string;
+          sender_id: string;
+          content: string;
+          read_at: string | null;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          conversation_id: string;
+          sender_id: string;
+          content: string;
+          read_at?: string | null;
+          created_at?: string;
+        };
+        Update: {
+          id?: string;
+          conversation_id?: string;
+          sender_id?: string;
+          content?: string;
+          read_at?: string | null;
           created_at?: string;
         };
         Relationships: [];

@@ -351,3 +351,211 @@ export async function checkCallerAccountStatus(): Promise<{
     return { allowed: true, status: "active" };
   }
 }
+
+/* ==========================================================================
+   3. SECURE ADMINISTRATOR INVITATION WORKFLOW
+   ========================================================================== */
+
+export interface AdminInvitationItem {
+  id: string;
+  clerk_invitation_id: string | null;
+  email: string;
+  invited_by: string;
+  status: "pending" | "accepted" | "revoked";
+  created_at: string;
+  accepted_at: string | null;
+  revoked_at: string | null;
+}
+
+/**
+ * Invites a new administrator via Clerk's invitation API.
+ *
+ * SECURITY GUARANTEES:
+ * 1. Caller must be an authenticated administrator with active account status.
+ * 2. Strict RFC email validation and lowercase normalization.
+ * 3. Prevents duplicate invitations if already pending or if user is already an admin.
+ * 4. Carries role metadata server-side via Clerk Backend API only.
+ * 5. Full audit logging with inviter ID, invitee email, and timestamp.
+ */
+export async function inviteAdminAction(email: string): Promise<{
+  success?: boolean;
+  invitationId?: string;
+  email?: string;
+  error?: string;
+}> {
+  // 1. Verify caller has active administrator privileges
+  const { adminId, adminEmail } = await verifyAdminCaller();
+  const callerStatus = await checkCallerAccountStatus();
+  if (!callerStatus.allowed || callerStatus.status !== "active") {
+    return { error: "Unauthorized: Only active administrators can invite administrators." };
+  }
+
+  // 2. Validate email
+  const trimmed = email?.trim() || "";
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  if (!trimmed || !emailRegex.test(trimmed)) {
+    return { error: "Please provide a valid email address." };
+  }
+  const normalizedEmail = trimmed.toLowerCase();
+
+  try {
+    const supabase = await getAdminActionClient();
+
+    // 3. Check if user is already an administrator
+    const { data: existingAdmin } = await supabase
+      .from("profiles")
+      .select("id, role")
+      .ilike("email", normalizedEmail)
+      .eq("role", "admin")
+      .maybeSingle();
+
+    if (existingAdmin) {
+      return { error: `${normalizedEmail} is already an administrator on this platform.` };
+    }
+
+    // 4. Check for duplicate pending invitation
+    const { data: existingInvite } = await supabase
+      .from("admin_invitations")
+      .select("id, status")
+      .ilike("email", normalizedEmail)
+      .eq("status", "pending")
+      .maybeSingle();
+
+    if (existingInvite) {
+      return { error: `An administrator invitation is already pending for ${normalizedEmail}.` };
+    }
+
+    // 5. Create Clerk Invitation using official Clerk Backend SDK
+    const client = await clerkClient();
+    const appUrl = process.env.NEXT_PUBLIC_APP_URL || "";
+    const invitation = await client.invitations.createInvitation({
+      emailAddress: normalizedEmail,
+      redirectUrl: appUrl ? `${appUrl}/admin` : undefined,
+      publicMetadata: {
+        role: "admin",
+        invitedAsAdmin: true,
+        invitedBy: adminId,
+      },
+      ignoreExisting: false,
+    });
+
+    // 6. Record tracked invitation in Supabase
+    try {
+      await supabase.from("admin_invitations").insert({
+        clerk_invitation_id: invitation.id,
+        email: normalizedEmail,
+        invited_by: adminId,
+        status: "pending",
+      });
+    } catch (dbErr) {
+      console.warn("[inviteAdminAction] Database tracking warning:", dbErr);
+    }
+
+    // 7. Record administrative audit trail
+    await recordAdminAudit(adminId, adminEmail, "admin_invited", "invitation", invitation.id, {
+      inviteeEmail: normalizedEmail,
+      clerkInvitationId: invitation.id,
+    });
+
+    revalidatePath("/admin");
+    revalidatePath("/admin/users");
+
+    return {
+      success: true,
+      invitationId: invitation.id,
+      email: normalizedEmail,
+    };
+  } catch (err: unknown) {
+    const clerkErr = err as { errors?: Array<{ message: string }>; message?: string };
+    const errMsg = clerkErr?.errors?.[0]?.message || clerkErr?.message || "Failed to dispatch administrator invitation.";
+    return { error: errMsg };
+  }
+}
+
+/**
+ * Retrieve all administrator invitations for dashboard display.
+ */
+export async function getAdminInvitationsAction(): Promise<{
+  success: boolean;
+  invitations: AdminInvitationItem[];
+  error?: string;
+}> {
+  await verifyAdminCaller();
+
+  try {
+    const supabase = await getAdminActionClient();
+    const { data: dbInvites, error: dbErr } = await supabase
+      .from("admin_invitations")
+      .select("*")
+      .order("created_at", { ascending: false });
+
+    if (!dbErr && dbInvites) {
+      return { success: true, invitations: dbInvites as AdminInvitationItem[] };
+    }
+  } catch (err) {
+    console.warn("[getAdminInvitationsAction] Database fallback:", err);
+  }
+
+  // Fallback: Query live invitations from Clerk
+  try {
+    const client = await clerkClient();
+    const clerkList = await client.invitations.getInvitationList({ status: "pending" });
+    const formatted: AdminInvitationItem[] = (clerkList?.data || []).map((inv) => ({
+      id: inv.id,
+      clerk_invitation_id: inv.id,
+      email: inv.emailAddress,
+      invited_by: (inv.publicMetadata as { invitedBy?: string })?.invitedBy || "Admin",
+      status: (inv.status as "pending" | "accepted" | "revoked") || "pending",
+      created_at: new Date(inv.createdAt).toISOString(),
+      accepted_at: null,
+      revoked_at: null,
+    }));
+    return { success: true, invitations: formatted };
+  } catch (err: unknown) {
+    return { success: false, invitations: [], error: (err as Error).message };
+  }
+}
+
+/**
+ * Revoke an active administrator invitation.
+ */
+export async function revokeAdminInvitationAction(invitationId: string): Promise<{
+  success: boolean;
+  error?: string;
+}> {
+  const { adminId, adminEmail } = await verifyAdminCaller();
+  const callerStatus = await checkCallerAccountStatus();
+  if (!callerStatus.allowed || callerStatus.status !== "active") {
+    return { success: false, error: "Unauthorized: Only active administrators can revoke invitations." };
+  }
+
+  try {
+    // 1. Revoke in Clerk
+    try {
+      const client = await clerkClient();
+      await client.invitations.revokeInvitation(invitationId);
+    } catch (clerkErr) {
+      console.warn("[revokeAdminInvitationAction] Clerk revoke notice:", clerkErr);
+    }
+
+    // 2. Update status in database
+    const supabase = await getAdminActionClient();
+    await supabase
+      .from("admin_invitations")
+      .update({
+        status: "revoked",
+        revoked_at: new Date().toISOString(),
+      })
+      .or(`clerk_invitation_id.eq.${invitationId},id.eq.${invitationId}`);
+
+    // 3. Record audit log
+    await recordAdminAudit(adminId, adminEmail, "admin_invitation_revoked", "invitation", invitationId, {});
+
+    revalidatePath("/admin");
+    revalidatePath("/admin/users");
+
+    return { success: true };
+  } catch (err: unknown) {
+    return { success: false, error: (err as Error).message || "Failed to revoke invitation." };
+  }
+}

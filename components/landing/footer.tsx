@@ -83,9 +83,9 @@ export function Footer() {
                 </a>
               </li>
               <li>
-                <a href="#categories" className="hover:text-foreground transition-colors">
+                <Link href="/listings" className="hover:text-foreground transition-colors">
                   Categories
-                </a>
+                </Link>
               </li>
               <li>
                 <Link href="/listings" className="hover:text-foreground transition-colors">

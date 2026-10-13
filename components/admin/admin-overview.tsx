@@ -16,12 +16,12 @@ import {
   Clock,
   CheckCircle2,
   XCircle,
-  FileText,
 } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import type { AdminOverviewStats } from "@/lib/supabase/admin";
+import { AdminInvitationsCard } from "@/components/admin/admin-invitations-card";
 
 interface AdminOverviewProps {
   stats: AdminOverviewStats;
@@ -512,6 +512,9 @@ export function AdminOverview({ stats }: AdminOverviewProps) {
           </div>
         </Card>
       </div>
+
+      {/* ── Administrator Invitations Console ────────────────────── */}
+      <AdminInvitationsCard />
     </div>
   );
 }

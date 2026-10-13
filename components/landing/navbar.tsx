@@ -4,7 +4,7 @@ import * as React from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { UserButton, useAuth, useUser } from "@clerk/nextjs";
-import { HardHat, Menu, X, ArrowRight, ShieldCheck } from "lucide-react";
+import { HardHat, Menu, X, ArrowRight, ShieldCheck, Heart } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
 export function Navbar() {
@@ -14,16 +14,21 @@ export function Navbar() {
   const { user } = useUser();
   const isAdmin = user?.publicMetadata?.role === "admin";
 
-  const isListingsSection = pathname.startsWith("/listings");
+  const isHomePage = pathname === "/";
+  const isListingsActive = pathname.startsWith("/listings");
 
-  // Keep navigation clean on /listings without redundant categories / how it works links
-  const activeNavLinks = isListingsSection
-    ? [{ name: "Browse Listings", href: "/listings" }]
-    : [
-        { name: "Listings", href: "/listings" },
-        { name: "Categories", href: pathname === "/" ? "#categories" : "/#categories" },
-        { name: "How It Works", href: pathname === "/" ? "#how-it-works" : "/#how-it-works" },
-      ];
+  const navLinks = [
+    {
+      name: "Browse Listings",
+      href: "/listings",
+      isActive: isListingsActive,
+    },
+    {
+      name: "How It Works",
+      href: isHomePage ? "#how-it-works" : "/#how-it-works",
+      isActive: false,
+    },
+  ];
 
   // Close mobile menu on escape key
   React.useEffect(() => {
@@ -61,14 +66,18 @@ export function Navbar() {
           className="hidden md:flex items-center gap-1 lg:gap-2"
           aria-label="Main Navigation"
         >
-          {activeNavLinks.map((link) => (
-            <a
+          {navLinks.map((link) => (
+            <Link
               key={link.name}
               href={link.href}
-              className="rounded-md px-3 py-2 text-sm font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              className={`rounded-md px-3 py-2 text-sm font-medium transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+                link.isActive
+                  ? "text-primary font-semibold"
+                  : "text-muted-foreground"
+              }`}
             >
               {link.name}
-            </a>
+            </Link>
           ))}
         </nav>
 
@@ -77,11 +86,6 @@ export function Navbar() {
           <Link href="/listings/new">
             <Button variant="outline" size="sm" className="font-medium border-primary/40 hover:bg-primary/10">
               List Your Item
-            </Button>
-          </Link>
-          <Link href="/listings">
-            <Button variant="outline" size="sm" className="font-medium">
-              Browse Listings
             </Button>
           </Link>
 
@@ -94,6 +98,12 @@ export function Navbar() {
                   </Button>
                 </Link>
               )}
+              <Link href="/dashboard/saved">
+                <Button variant="ghost" size="sm" className="font-medium text-rose-500 hover:text-rose-600">
+                  <Heart className="mr-1.5 h-3.5 w-3.5" fill="currentColor" aria-hidden="true" />
+                  Saved
+                </Button>
+              </Link>
               <Link href="/dashboard">
                 <Button variant="ghost" size="sm" className="font-medium">
                   Dashboard
@@ -148,15 +158,19 @@ export function Navbar() {
       {mobileMenuOpen && (
         <div className="border-b border-border bg-background px-4 pt-2 pb-6 md:hidden animate-in slide-in-from-top-2 duration-150">
           <nav className="flex flex-col space-y-2 py-2" aria-label="Mobile Navigation">
-            {activeNavLinks.map((link) => (
-              <a
+            {navLinks.map((link) => (
+              <Link
                 key={link.name}
                 href={link.href}
                 onClick={() => setMobileMenuOpen(false)}
-                className="rounded-lg px-3 py-2.5 text-base font-medium text-foreground transition-colors hover:bg-muted"
+                className={`rounded-lg px-3 py-2.5 text-base font-medium transition-colors hover:bg-muted ${
+                  link.isActive
+                    ? "text-primary font-semibold"
+                    : "text-foreground"
+                }`}
               >
                 {link.name}
-              </a>
+              </Link>
             ))}
           </nav>
 
@@ -168,15 +182,6 @@ export function Navbar() {
             >
               <Button variant="outline" className="w-full justify-center border-primary/40">
                 List Your Item
-              </Button>
-            </Link>
-            <Link
-              href="/listings"
-              onClick={() => setMobileMenuOpen(false)}
-              className="block"
-            >
-              <Button className="w-full justify-center">
-                Browse Listings
               </Button>
             </Link>
 
@@ -193,6 +198,16 @@ export function Navbar() {
                     </Button>
                   </Link>
                 )}
+                <Link
+                  href="/dashboard/saved"
+                  onClick={() => setMobileMenuOpen(false)}
+                  className="block"
+                >
+                  <Button variant="outline" className="w-full justify-center text-rose-500 border-rose-200">
+                    <Heart className="mr-1.5 h-4 w-4" fill="currentColor" aria-hidden="true" />
+                    Saved Listings
+                  </Button>
+                </Link>
                 <Link
                   href="/dashboard"
                   onClick={() => setMobileMenuOpen(false)}

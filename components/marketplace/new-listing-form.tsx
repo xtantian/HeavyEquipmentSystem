@@ -22,7 +22,8 @@ import { Label } from "@/components/ui/label";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
-import type { CategoryRow, AttributeFieldSchema, Json } from "@/lib/supabase/types";
+import { createListingAction } from "@/app/listings/actions";
+import type { CategoryRow, AttributeFieldSchema } from "@/lib/supabase/types";
 
 function getInitialAttributes(schema: AttributeFieldSchema[]): Record<string, unknown> {
   const initialAttrs: Record<string, unknown> = {};
@@ -61,6 +62,7 @@ export function NewListingForm({ categories, userId }: NewListingFormProps) {
   const [priceUnit, setPriceUnit] = React.useState("per day");
   const [deposit, setDeposit] = React.useState("");
   const [location, setLocation] = React.useState("");
+  const [assetIdentifier, setAssetIdentifier] = React.useState("");
 
   // Dynamic Category Attribute Fields
   const [dynamicAttributes, setDynamicAttributes] = React.useState<Record<string, unknown>>(() => {
@@ -78,6 +80,7 @@ export function NewListingForm({ categories, userId }: NewListingFormProps) {
   // Submission State
   const [isSubmitting, setIsSubmitting] = React.useState(false);
   const [submitError, setSubmitError] = React.useState<string | null>(null);
+  const [duplicateListingId, setDuplicateListingId] = React.useState<string | null>(null);
   const [createdListingId, setCreatedListingId] = React.useState<string | null>(null);
 
   // Active Category Object & Schema
@@ -91,6 +94,44 @@ export function NewListingForm({ categories, userId }: NewListingFormProps) {
       return activeCategory.attribute_schema as unknown as AttributeFieldSchema[];
     }
     return [];
+  }, [activeCategory]);
+
+  const { assetIdLabel, assetIdPlaceholder } = React.useMemo(() => {
+    const slug = activeCategory?.slug || "";
+    if (slug === "cars" || slug === "motorbikes") {
+      return {
+        assetIdLabel: "VIN, Chassis, or Plate Number",
+        assetIdPlaceholder: "e.g. 1HGCR2F83HA000123 or ABC-1234",
+      };
+    }
+    if (slug === "special-vehicles") {
+      return {
+        assetIdLabel: "Chassis, Hull ID, or License Plate",
+        assetIdPlaceholder: "e.g. HIN-US-123456 or Plate ABC-987",
+      };
+    }
+    if (slug === "industrial") {
+      return {
+        assetIdLabel: "Machine PIN / Serial Number",
+        assetIdPlaceholder: "e.g. CAT0320GCK82910 or SN-90218",
+      };
+    }
+    if (slug === "mobile-phones-gadgets" || slug === "computers-tech") {
+      return {
+        assetIdLabel: "IMEI or Device Serial Number",
+        assetIdPlaceholder: "e.g. 352093081928312 or C02G8192MD6R",
+      };
+    }
+    if (slug === "property") {
+      return {
+        assetIdLabel: "Property Title / Unit Reference",
+        assetIdPlaceholder: "e.g. Unit 14-B or TCT-129482",
+      };
+    }
+    return {
+      assetIdLabel: "Asset Identifier or Serial / Tag Number",
+      assetIdPlaceholder: "e.g. TAG-2024-001 or SN-10928",
+    };
   }, [activeCategory]);
 
   const handleCategoryChange = (newCatId: string) => {
@@ -306,99 +347,44 @@ export function NewListingForm({ categories, userId }: NewListingFormProps) {
         price_unit: priceUnit,
       };
 
-      const newListingId = `lst_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
-
-      // 2. Insert into listings table with status 'available' so it immediately shows in the marketplace
-      const listingPayload = {
-        owner_id: userId,
-        category_id: categoryId,
-        title: title.trim(),
-        description: description.trim(),
-        price_per_day: Number(price),
-        location: location.trim(),
-        attributes: finalAttributes as unknown as Json,
+      // 2. Publish listing through authoritative server action with duplicate physical item prevention
+      const result = await createListingAction({
+        title,
+        description,
+        categoryId,
+        pricePerDay: Number(price),
+        location,
         images: uploadedImageUrls,
-        status: "available" as const,
-      };
+        attributes: finalAttributes,
+        assetIdentifier: assetIdentifier.trim() || undefined,
+      });
 
-      let insertedId = newListingId;
-
-      let { data: insertedData, error: insertError } = await supabase
-        .from("listings")
-        .insert(listingPayload)
-        .select("id")
-        .single();
-
-      console.log("[insert listing]", { data: insertedData, error: insertError });
-
-      // If Supabase returned a JWT auth error (401 or PGRST301 due to unconfigured Clerk Third-Party Auth in Supabase),
-      // retry with the public client so the listing write still succeeds in Supabase
-      if (
-        insertError &&
-        (insertError.code === "PGRST301" ||
-          insertError.message?.toLowerCase().includes("jwt") ||
-          (insertError as { status?: number }).status === 401)
-      ) {
-        console.warn(
-          "[supabase] Clerk token rejected by Supabase (Clerk Third-Party Auth not configured). Retrying with public anon client..."
-        );
-        const publicClient = createSupabaseBrowserClient(null);
-        const retryResult = await publicClient
-          .from("listings")
-          .insert(listingPayload)
-          .select("id")
-          .single();
-        console.log("[insert listing retry with anon client]", retryResult);
-        insertedData = retryResult.data;
-        insertError = retryResult.error;
-      }
-
-      // DO NOT swallow database errors! Report them to the user.
-      if (insertError) {
-        console.error("[supabase] Database insert error:", JSON.stringify(insertError, null, 2));
-        setSubmitError(
-          `Failed to save listing to database: ${insertError.message} (${insertError.code || "ERR"}). Ensure Supabase migrations have been run.`
-        );
+      if (!result.success) {
+        setSubmitError(result.error || "Failed to publish listing.");
+        if (result.duplicate && result.existingListingId) {
+          setDuplicateListingId(result.existingListingId);
+        }
         setIsSubmitting(false);
         return;
       }
 
-      if (insertedData?.id) {
-        insertedId = insertedData.id;
+      const insertedId = result.listingId || `lst_${Date.now()}`;
+      setCreatedListingId(insertedId);
 
-        // 3. Insert into listing_images table (matches table schema: image_url, is_primary, sort_order)
-        if (uploadedImageUrls.length > 0) {
+      // 3. Best-effort mirror into listing_images table for gallery relational indexing
+      if (uploadedImageUrls.length > 0 && result.listingId) {
+        try {
           const imageRows = uploadedImageUrls.map((url, idx) => ({
-            listing_id: insertedId,
+            listing_id: result.listingId!,
             image_url: url,
             is_primary: idx === 0,
             sort_order: idx,
           }));
-
-          const { data: imgData, error: imgError } = await supabase
-            .from("listing_images")
-            .insert(imageRows)
-            .select();
-
-          console.log("[insert listing_images]", { data: imgData, error: imgError });
-
-          if (
-            imgError &&
-            (imgError.code === "PGRST301" ||
-              imgError.message?.toLowerCase().includes("jwt") ||
-              (imgError as { status?: number }).status === 401)
-          ) {
-            const publicClient = createSupabaseBrowserClient(null);
-            const retryImg = await publicClient
-              .from("listing_images")
-              .insert(imageRows)
-              .select();
-            console.log("[insert listing_images retry with anon client]", retryImg);
-          }
+          await supabase.from("listing_images").insert(imageRows);
+        } catch (imgErr) {
+          console.warn("[listing_images] Relational mirror warning:", imgErr);
         }
       }
-
-      setCreatedListingId(insertedId);
     } catch (err: unknown) {
       console.error("[supabase] Uncaught exception during listing creation:", err);
       const message = err instanceof Error ? err.message : "Failed to create listing. Please try again.";
@@ -534,6 +520,34 @@ export function NewListingForm({ categories, userId }: NewListingFormProps) {
               className="mt-1.5 h-11 rounded-xl"
               required
             />
+          </div>
+
+          {/* Persistent Physical Asset Identifier (Private) */}
+          <div className="sm:col-span-2 rounded-xl border border-border/80 bg-muted/40 p-4">
+            <div className="flex items-center justify-between mb-1.5">
+              <Label htmlFor="assetIdentifier" className="text-xs font-semibold text-foreground uppercase tracking-wider">
+                {assetIdLabel} <span className="text-[11px] font-normal text-muted-foreground lowercase">(private)</span>
+              </Label>
+              <Badge variant="outline" className="text-[10px] uppercase font-semibold text-primary border-primary/30">
+                Anti-Duplicate Protection
+              </Badge>
+            </div>
+            <Input
+              id="assetIdentifier"
+              value={assetIdentifier}
+              onChange={(e) => {
+                setAssetIdentifier(e.target.value);
+                if (duplicateListingId) {
+                  setDuplicateListingId(null);
+                  setSubmitError(null);
+                }
+              }}
+              placeholder={assetIdPlaceholder}
+              className="mt-1 h-11 rounded-xl bg-background"
+            />
+            <p className="mt-1.5 text-xs text-muted-foreground">
+              Stored securely to prevent creating duplicate listings for the same physical unit. Never displayed publicly on the marketplace.
+            </p>
           </div>
         </div>
       </Card>
@@ -786,11 +800,30 @@ export function NewListingForm({ categories, userId }: NewListingFormProps) {
         )}
       </Card>
 
-      {/* Error Notice */}
+      {/* Error / Duplicate Notice */}
       {submitError && (
-        <div className="flex items-center gap-2 rounded-xl bg-destructive/10 border border-destructive/30 p-4 text-sm font-medium text-destructive">
-          <AlertCircle className="h-5 w-5 shrink-0" />
-          <span>{submitError}</span>
+        <div className="rounded-xl bg-destructive/10 border border-destructive/30 p-4 text-sm font-medium text-destructive">
+          <div className="flex items-start gap-2.5">
+            <AlertCircle className="h-5 w-5 shrink-0 mt-0.5" />
+            <div className="flex-1 space-y-2">
+              <p className="leading-relaxed">{submitError}</p>
+              {duplicateListingId && (
+                <div className="pt-1">
+                  <Link href={`/listings/${duplicateListingId}`}>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      className="border-destructive/40 text-destructive hover:bg-destructive/10 font-semibold cursor-pointer"
+                    >
+                      View & Manage Existing Listing
+                      <ArrowRight className="ml-1.5 h-3.5 w-3.5" />
+                    </Button>
+                  </Link>
+                </div>
+              )}
+            </div>
+          </div>
         </div>
       )}
 

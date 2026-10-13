@@ -167,7 +167,13 @@ export async function getMarketplaceListings(
           }));
         }
       }
-      return results;
+
+      // Security: Strip sensitive asset_identifier (VIN, serial number) from public marketplace listing items
+      return results.map((item) => {
+        const safeItem = { ...item };
+        delete (safeItem as Record<string, unknown>).asset_identifier;
+        return safeItem as MarketplaceListingItem;
+      });
     }
   } catch (err) {
     console.error("[supabase/marketplace] Error fetching listings:", err);
@@ -218,7 +224,10 @@ export async function getMarketplaceListingById(
       .maybeSingle();
 
     if (!error && data) {
-      return data as unknown as MarketplaceListingItem;
+      // Security: Never leak sensitive asset_identifier publicly
+      const safeData = { ...data };
+      delete (safeData as Record<string, unknown>).asset_identifier;
+      return safeData as MarketplaceListingItem;
     }
   } catch (err) {
     console.error(`[supabase/marketplace] Error fetching listing ${id}:`, err);
