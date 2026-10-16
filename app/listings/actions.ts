@@ -4,6 +4,11 @@ import { auth } from "@clerk/nextjs/server";
 import { revalidatePath } from "next/cache";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import type { Json } from "@/lib/supabase/types";
+import {
+  evaluateDuplicateSignals,
+  checkCategoryQuota,
+  type DuplicateDetectionResult,
+} from "@/lib/marketplace/integrity";
 
 export interface CreateListingInput {
   title: string;
@@ -21,6 +26,8 @@ export interface CreateListingResult {
   listingId?: string;
   error?: string;
   duplicate?: boolean;
+  quarantined?: boolean;
+  quarantineMessage?: string;
   existingListingId?: string;
   code?: "AUTH_REQUIRED" | "RESTRICTED" | "DUPLICATE_ASSET" | "INVALID_INPUT" | "ERROR";
 }
@@ -99,8 +106,11 @@ export async function createListingAction(
     };
   }
 
+  // Normalize asset identifier (strip whitespace, hyphens, and convert to lowercase)
   const rawAssetIdentifier = input.assetIdentifier?.trim();
-  const normalizedAssetId = rawAssetIdentifier ? rawAssetIdentifier.toLowerCase() : null;
+  const normalizedAssetId = rawAssetIdentifier
+    ? rawAssetIdentifier.toLowerCase().replace(/[^a-z0-9]/gi, "")
+    : null;
 
   try {
     const supabase = await createSupabaseServerClient();
@@ -128,25 +138,58 @@ export async function createListingAction(
       };
     }
 
-    // 4. Duplicate physical item detection
-    if (normalizedAssetId) {
-      const { data: existingAssetListing } = await supabase
-        .from("listings")
-        .select("id, title, status")
-        .eq("owner_id", userId)
-        .ilike("asset_identifier", normalizedAssetId)
-        .neq("status", "deleted")
-        .maybeSingle();
+    // 4. Category Stock-Slot Quota Enforcement
+    const { data: userCatListings } = await supabase
+      .from("listings")
+      .select("id")
+      .eq("owner_id", userId)
+      .eq("category_id", catId)
+      .not("status", "in", '("deleted","archived")');
 
-      if (existingAssetListing) {
-        return {
-          success: false,
-          duplicate: true,
-          existingListingId: existingAssetListing.id,
-          code: "DUPLICATE_ASSET",
-          error: `You already have an active listing for this physical item ("${existingAssetListing.title}"). Please manage or edit your existing listing instead of creating another one.`,
-        };
+    const activeCatCount = userCatListings?.length || 0;
+    const quota = checkCategoryQuota(activeCatCount);
+    if (!quota.allowed) {
+      return {
+        success: false,
+        error: `You have reached the maximum active equipment allowance (${quota.maxAllowed}) for this category. Please manage your existing inventory or upgrade your account tier.`,
+        code: "INVALID_INPUT",
+      };
+    }
+
+    // 5. Active Cooldown & Strike Enforcement
+    let latestEnforcement: { cooldown_until: string | null; strike_count: number } | null = null;
+    try {
+      const { data: enforcements } = await supabase
+        .from("duplicate_enforcements")
+        .select("cooldown_until, strike_count")
+        .eq("user_id", userId)
+        .order("created_at", { ascending: false })
+        .limit(1);
+
+      latestEnforcement = enforcements?.[0] || null;
+
+      if (latestEnforcement) {
+        if (latestEnforcement.strike_count >= 3) {
+          return {
+            success: false,
+            error: "Your account requires administrative verification before publishing new equipment listings due to multiple duplicate violations.",
+            code: "RESTRICTED",
+          };
+        }
+
+        if (latestEnforcement.cooldown_until) {
+          const cooldownTime = new Date(latestEnforcement.cooldown_until).getTime();
+          if (cooldownTime > Date.now()) {
+            return {
+              success: false,
+              error: `Your account is temporarily in a listing cooldown until ${new Date(latestEnforcement.cooldown_until).toLocaleString()} due to duplicate equipment detection.`,
+              code: "RESTRICTED",
+            };
+          }
+        }
       }
+    } catch {
+      // Non-fatal if table pending
     }
 
     // Ensure fallback image if none uploaded
@@ -155,7 +198,93 @@ export async function createListingAction(
         ? input.images
         : ["/images/equipment_loader.jpg"];
 
-    // 5. Insert listing into database
+    // 6. Multi-Attribute Duplicate Signals & Visual Match Evaluation
+    const candidateProfile = {
+      title: trimmedTitle,
+      description: trimmedDesc,
+      categoryId: catId,
+      pricePerDay: price,
+      location: trimmedLoc,
+      serialOrVin: rawAssetIdentifier,
+      images: finalImages,
+      ownerId: userId,
+      make: String(input.attributes?.make || ""),
+      model: String(input.attributes?.model || ""),
+    };
+
+    const { data: existingCandidates } = await supabase
+      .from("listings")
+      .select("id, title, description, category_id, price_per_day, location, owner_id, asset_identifier, attributes, images")
+      .not("status", "in", '("deleted","archived")')
+      .limit(60);
+
+    let duplicateSignal: DuplicateDetectionResult | null = null;
+    for (const ext of existingCandidates || []) {
+      const signal = evaluateDuplicateSignals(candidateProfile, {
+        id: ext.id,
+        title: ext.title,
+        description: ext.description || "",
+        categoryId: ext.category_id,
+        pricePerDay: ext.price_per_day,
+        location: ext.location || "",
+        ownerId: ext.owner_id,
+        assetIdentifier: ext.asset_identifier,
+        attributes: (ext.attributes || {}) as Record<string, unknown>,
+        images: ext.images || [],
+      });
+
+      if (signal.classification === "CONFIRMED_DUPLICATE" || signal.classification === "SUSPECTED_DUPLICATE") {
+        duplicateSignal = signal;
+        break;
+      }
+    }
+
+    // Exact physical asset match for same owner -> block with direct resolution link
+    if (duplicateSignal?.classification === "CONFIRMED_DUPLICATE" && duplicateSignal.isSameOwner) {
+      return {
+        success: false,
+        duplicate: true,
+        existingListingId: duplicateSignal.existingListingId,
+        code: "DUPLICATE_ASSET",
+        error: `You already have an active listing for this physical item ("${duplicateSignal.existingListingTitle || trimmedTitle}"). Please manage or edit your existing listing instead of creating another one.`,
+      };
+    }
+
+    // Quarantine suspect items or cross-account collisions
+    let initialStatus: "available" | "shadow_quarantined" = "available";
+    let isQuarantined = false;
+    let quarantineMsg: string | undefined;
+
+    if (duplicateSignal?.requiresQuarantine) {
+      initialStatus = "shadow_quarantined";
+      isQuarantined = true;
+      quarantineMsg =
+        "Your listing has been submitted and queued for verification because similar equipment attributes were detected. It will become publicly visible once confirmed by operations.";
+
+      try {
+        const currentStrikes = latestEnforcement?.strike_count || 0;
+        const nextStrikes = currentStrikes + 1;
+        const cooldownHours = nextStrikes >= 2 ? 24 : 0;
+        const cooldownUntil =
+          cooldownHours > 0
+            ? new Date(Date.now() + cooldownHours * 60 * 60 * 1000).toISOString()
+            : null;
+
+        await supabase
+          .from("duplicate_enforcements")
+          .insert({
+            user_id: userId,
+            strike_count: nextStrikes,
+            cooldown_until: cooldownUntil,
+            reason: duplicateSignal.classification,
+            target_asset_fingerprint: duplicateSignal.existingListingId || null,
+          });
+      } catch {
+        // Non-fatal if table pending
+      }
+    }
+
+    // 7. Insert listing into database
     const insertPayload = {
       owner_id: userId,
       category_id: catId,
@@ -165,7 +294,7 @@ export async function createListingAction(
       location: trimmedLoc,
       attributes: (input.attributes || {}) as unknown as Json,
       images: finalImages,
-      status: "available" as const,
+      status: initialStatus,
       asset_identifier: normalizedAssetId ? rawAssetIdentifier : null,
     };
 
@@ -249,6 +378,8 @@ export async function createListingAction(
     return {
       success: true,
       listingId: inserted.id,
+      quarantined: isQuarantined,
+      quarantineMessage: quarantineMsg,
     };
   } catch (err: unknown) {
     const errorMsg = (err as Error)?.message || "";

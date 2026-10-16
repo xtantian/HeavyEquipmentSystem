@@ -1,6 +1,6 @@
 "use server";
 
-import { auth } from "@clerk/nextjs/server";
+import { auth, currentUser } from "@clerk/nextjs/server";
 import { parseISO, isBefore, startOfToday } from "date-fns";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { RESERVATION_BLOCKING_STATUSES } from "@/lib/supabase/marketplace";
@@ -125,12 +125,14 @@ export async function createBookingAction(
   try {
     const supabase = await createSupabaseServerClient();
 
-    // 5. Check user profile account status (fail-closed)
-    const { data: userProfile, error: profileError } = await supabase
+    // 5. Check user profile account status (fail-closed, with lazy-sync fallback)
+    const { data: initialProfile, error: profileError } = await supabase
       .from("profiles")
       .select("status")
       .eq("clerk_user_id", userId)
       .maybeSingle();
+
+    let userProfile = initialProfile;
 
     if (profileError) {
       console.error("[createBookingAction] Profile status lookup database error:", {
@@ -143,6 +145,50 @@ export async function createBookingAction(
         error: "A database error occurred while verifying your account. Please try again later.",
         code: "DB_ERROR",
       };
+    }
+
+    // If profile is not found, the user may have just signed up before webhook sync finished.
+    // Perform an authoritative lazy-sync using the authenticated currentUser() session.
+    if (!userProfile) {
+      try {
+        const user = await currentUser();
+        if (user && user.id === userId) {
+          const primaryEmail =
+            user.emailAddresses.find((e) => e.id === user.primaryEmailAddressId)
+              ?.emailAddress ?? user.emailAddresses[0]?.emailAddress ?? null;
+
+          const { data: syncedProfile, error: syncError } = await supabase
+            .from("profiles")
+            .upsert(
+              {
+                clerk_user_id: user.id,
+                email: primaryEmail,
+                first_name: user.firstName ?? null,
+                last_name: user.lastName ?? null,
+                avatar_url: user.imageUrl || null,
+                role: "customer",
+                status: "active",
+                updated_at: new Date().toISOString(),
+              },
+              {
+                onConflict: "clerk_user_id",
+                ignoreDuplicates: false,
+              }
+            )
+            .select("status")
+            .single();
+
+          if (!syncError && syncedProfile) {
+            userProfile = syncedProfile;
+            console.info("[createBookingAction] Auto-synced missing user profile on demand:", {
+              correlationId,
+              userId,
+            });
+          }
+        }
+      } catch (syncErr) {
+        console.warn("[createBookingAction] Lazy profile sync attempt failed:", syncErr);
+      }
     }
 
     if (!userProfile) {

@@ -16,6 +16,7 @@ import {
   getListerRatingSummary,
 } from "@/lib/supabase/lister-reviews";
 import { ListerProfileCard } from "@/components/reviews/lister-profile-card";
+import { ReportButton } from "@/components/moderation/report-button";
 
 interface ListingDetailPageProps {
   params: Promise<{ id: string }>;
@@ -86,6 +87,15 @@ export default async function ListingDetailPage({ params }: ListingDetailPagePro
               <Badge className="bg-emerald-600 text-white text-xs">
                 Verified Listing
               </Badge>
+              <ReportButton
+                targetType="listing"
+                targetId={listing.id}
+                targetTitle={listing.title}
+                variant="outline"
+                size="sm"
+                label="Report"
+                className="h-6 text-xs text-muted-foreground hover:text-destructive hover:border-destructive/40"
+              />
             </div>
           </div>
 

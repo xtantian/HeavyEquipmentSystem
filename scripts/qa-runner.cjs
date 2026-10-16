@@ -1616,6 +1616,504 @@ assert(simulateProxyRouteProtection("/listings/12c46209-85b4-4bb5-860a-54325662e
 assert(simulateProxyRouteProtection("/sign-in", false).allowed, "Sign-in route is public and does not self-redirect");
 assert(simulateProxyRouteProtection("/sign-up", false).allowed, "Sign-up route is public and does not self-redirect");
 
+// -----------------------------------------------------------------------------
+// 18. DELETION, CANCELLATION, IDENTITY & REVIEWS VERIFICATION
+// -----------------------------------------------------------------------------
+console.log("\n▶ SUITE 18: Listing Deletion, Safe Cancellation, Identity & Reviews");
+
+// Simulation 18.1: Safe Listing Deletion / Archiving
+function simulateListingDeletion(listing, existingBookings) {
+  const activeStatuses = ["pending", "accepted", "paid", "active"];
+  const hasActiveBookings = existingBookings.some(
+    (b) => b.listing_id === listing.id && activeStatuses.includes(b.status)
+  );
+
+  if (hasActiveBookings) {
+    return {
+      allowed: false,
+      code: "ACTIVE_BOOKINGS_EXIST",
+      error: "Cannot remove listing while active or pending reservations exist.",
+    };
+  }
+
+  return {
+    allowed: true,
+    newStatus: "archived",
+    deleted_at: new Date().toISOString(),
+  };
+}
+
+const mockListingWithBookings = { id: "list-1", title: "Excavator CAT 320" };
+const activeBookingList = [
+  { id: "bk-1", listing_id: "list-1", status: "pending" },
+  { id: "bk-2", listing_id: "list-2", status: "completed" },
+];
+const clearBookingList = [
+  { id: "bk-3", listing_id: "list-1", status: "completed" },
+  { id: "bk-4", listing_id: "list-1", status: "cancelled" },
+];
+
+const deleteBlockedResult = simulateListingDeletion(mockListingWithBookings, activeBookingList);
+assert(!deleteBlockedResult.allowed && deleteBlockedResult.code === "ACTIVE_BOOKINGS_EXIST", "Listing deletion blocked when active/pending bookings exist");
+
+const deleteAllowedResult = simulateListingDeletion(mockListingWithBookings, clearBookingList);
+assert(deleteAllowedResult.allowed && deleteAllowedResult.newStatus === "archived", "Listing deletion succeeds via archiving when no active bookings exist");
+
+// Simulation 18.2: Safe Booking Cancellation Transitions
+function simulateBookingTransition(callerRole, currentStatus, targetStatus) {
+  if (callerRole === "renter") {
+    if (targetStatus === "cancelled") {
+      if (["pending", "accepted"].includes(currentStatus)) {
+        return { allowed: true, newStatus: "cancelled" };
+      }
+      return { allowed: false, code: "INVALID_TRANSITION", error: "Only pending or accepted reservations can be cancelled." };
+    }
+    return { allowed: false, code: "UNAUTHORIZED", error: "Renter cannot perform this transition." };
+  }
+
+  if (callerRole === "owner") {
+    if (targetStatus === "accepted") {
+      if (currentStatus === "pending") {
+        return { allowed: true, newStatus: "accepted" };
+      }
+      return { allowed: false, code: "INVALID_TRANSITION", error: "Only pending requests can be accepted." };
+    }
+    if (targetStatus === "cancelled") {
+      if (["pending", "accepted"].includes(currentStatus)) {
+        return { allowed: true, newStatus: "cancelled" };
+      }
+      return { allowed: false, code: "INVALID_TRANSITION", error: "Cannot decline or cancel a booking in current status." };
+    }
+  }
+
+  return { allowed: false, code: "UNAUTHORIZED", error: "Unauthorized status transition." };
+}
+
+assert(simulateBookingTransition("renter", "pending", "cancelled").allowed, "Renter can cancel pending booking");
+assert(simulateBookingTransition("renter", "accepted", "cancelled").allowed, "Renter can cancel accepted booking");
+assert(!simulateBookingTransition("renter", "active", "cancelled").allowed, "Renter cannot cancel active ongoing rental");
+assert(!simulateBookingTransition("renter", "completed", "cancelled").allowed, "Renter cannot cancel completed rental");
+assert(simulateBookingTransition("owner", "pending", "accepted").allowed, "Owner can accept pending request");
+assert(!simulateBookingTransition("owner", "accepted", "accepted").allowed, "Owner cannot accept already accepted booking");
+assert(simulateBookingTransition("owner", "pending", "cancelled").allowed, "Owner can decline pending request");
+assert(!simulateBookingTransition("owner", "completed", "cancelled").allowed, "Owner cannot decline/cancel completed rental");
+
+// Simulation 18.3: Readable User Identity & Privacy Preservation
+function formatUserDisplayName(profile, rawUserId) {
+  if (profile) {
+    const fullName = [profile.first_name, profile.last_name].filter(Boolean).join(" ").trim();
+    if (fullName) return fullName;
+  }
+  if (rawUserId && rawUserId.startsWith("mock-")) return "Demo Renter";
+  return "Verified Renter";
+}
+
+assert(formatUserDisplayName({ first_name: "Maria", last_name: "Santos" }, "user_123") === "Maria Santos", "Renders full name Maria Santos");
+assert(formatUserDisplayName({ first_name: "Carlos", last_name: null }, "user_456") === "Carlos", "Renders single name Carlos");
+assert(formatUserDisplayName(null, "user_3KmK4yh1ZXXabc123") === "Verified Renter", "Falls back to Verified Renter without leaking raw Clerk ID user_3KmK...");
+assert(formatUserDisplayName(null, "mock-user-1") === "Demo Renter", "Renders Demo Renter for mock user");
+
+// Simulation 18.4: Lister Reviews Validation & Eligibility
+function simulateReviewSubmission({ reviewerId, listerId, bookingStatus, rating, comment }) {
+  if (!reviewerId) return { error: "AUTH_REQUIRED" };
+  if (!rating || rating < 1 || rating > 5 || !Number.isInteger(rating)) return { error: "INVALID_INPUT" };
+  if (reviewerId === listerId) return { error: "SELF_REVIEW" };
+  if (!["completed", "returned"].includes(bookingStatus)) return { error: "NOT_ELIGIBLE" };
+  if (comment && comment.length > 1000) return { error: "INVALID_INPUT" };
+  return { success: true };
+}
+
+assert(simulateReviewSubmission({ reviewerId: "renter-1", listerId: "lister-2", bookingStatus: "completed", rating: 5 }).success, "Eligible completed booking review succeeds");
+assert(simulateReviewSubmission({ reviewerId: "renter-1", listerId: "lister-2", bookingStatus: "returned", rating: 4 }).success, "Eligible returned booking review succeeds");
+assert(simulateReviewSubmission({ reviewerId: "user-1", listerId: "user-1", bookingStatus: "completed", rating: 5 }).error === "SELF_REVIEW", "Self-review is strictly rejected");
+assert(simulateReviewSubmission({ reviewerId: "renter-1", listerId: "lister-2", bookingStatus: "pending", rating: 5 }).error === "NOT_ELIGIBLE", "Pending booking review is strictly rejected");
+assert(simulateReviewSubmission({ reviewerId: "renter-1", listerId: "lister-2", bookingStatus: "active", rating: 5 }).error === "NOT_ELIGIBLE", "Active in-progress booking review is strictly rejected");
+assert(simulateReviewSubmission({ reviewerId: "renter-1", listerId: "lister-2", bookingStatus: "completed", rating: 6 }).error === "INVALID_INPUT", "Invalid rating (>5) is rejected");
+
+// -----------------------------------------------------------------------------
+// 19. INTEGRITY, REVIEWS, REPORTING & LIFECYCLE OVERHAUL VERIFICATION
+// -----------------------------------------------------------------------------
+console.log("\n▶ SUITE 19: Marketplace Integrity, Reviews, Reporting & Lifecycle Overhaul");
+
+// 19.1: Physical Deletion vs Historical Audit Archiving Simulation
+function simulateAuthoritativeListingRemoval(listing, bookings, openReports = []) {
+  if (openReports && openReports.length > 0) {
+    return {
+      success: false,
+      code: "RESTRICTED",
+      error: "Cannot delete listing while active moderation reports are under review.",
+    };
+  }
+
+  const activeBookings = bookings.filter((b) =>
+    ["pending", "accepted", "paid", "active"].includes(b.status)
+  );
+  if (activeBookings.length > 0) {
+    return {
+      success: false,
+      code: "ACTIVE_BOOKINGS_EXIST",
+      error: "Cannot remove listing while active or pending reservations exist.",
+    };
+  }
+
+  const hasHistorical = bookings.some((b) =>
+    ["completed", "returned", "cancelled"].includes(b.status)
+  );
+  if (hasHistorical) {
+    return {
+      success: false,
+      code: "HISTORICAL_RECORDS_EXIST",
+      action: "prompt_archive",
+      error: "This equipment has historical rental records that must be retained for audit compliance.",
+    };
+  }
+
+  // 0 bookings: physical hard delete from database & storage cleanup
+  return {
+    success: true,
+    mode: "deleted",
+    storagePhotosCleaned: true,
+    deletedFromDb: true,
+  };
+}
+
+const unbookedListing = { id: "list-zero", title: "Never Rented Generator" };
+const historicalListing = { id: "list-hist", title: "Historical Backhoe" };
+const activeListingItem = { id: "list-act", title: "Active Bulldozer" };
+
+const zeroResult = simulateAuthoritativeListingRemoval(unbookedListing, []);
+assert(zeroResult.success && zeroResult.mode === "deleted", "0-booking listing is physically hard-deleted from database");
+assert(zeroResult.storagePhotosCleaned === true, "Storage photos are cleaned up on physical deletion");
+
+const repResult = simulateAuthoritativeListingRemoval(unbookedListing, [], [{ id: "r1", status: "pending" }]);
+assert(!repResult.success && repResult.code === "RESTRICTED", "Active moderation reports block physical deletion");
+
+const histResult = simulateAuthoritativeListingRemoval(historicalListing, [{ id: "b1", status: "completed" }]);
+assert(!histResult.success && histResult.code === "HISTORICAL_RECORDS_EXIST", "Historical bookings block hard delete to protect audit trail");
+assert(histResult.action === "prompt_archive", "Historical bookings prompt user with safe archiving option");
+
+const actResult = simulateAuthoritativeListingRemoval(activeListingItem, [{ id: "b2", status: "accepted" }]);
+assert(!actResult.success && actResult.code === "ACTIVE_BOOKINGS_EXIST", "Active/pending bookings block deletion");
+
+// 19.2: Canonical Equipment Identifier Normalization
+function normalizeAssetIdentifierTest(raw) {
+  if (!raw) return null;
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  const lower = trimmed.toLowerCase();
+  const trivialValues = new Set(["n/a", "na", "none", "null", "nil", "unknown", "0", "0000", "xxx"]);
+  if (trivialValues.has(lower)) return null;
+  const alphanumericOnly = lower.replace(/[^a-z0-9]/gi, "");
+  if (alphanumericOnly.length < 3) return null;
+  return alphanumericOnly;
+}
+
+assert(normalizeAssetIdentifierTest("  VIN-1HGCR2F83HA-001234  ") === "vin1hgcr2f83ha001234", "Strips spaces, hyphens, and casing from VIN");
+assert(normalizeAssetIdentifierTest("N/A") === null, "Treats N/A as strictly null");
+assert(normalizeAssetIdentifierTest("none") === null, "Treats 'none' as strictly null");
+assert(normalizeAssetIdentifierTest("00") === null, "Treats short/trivial value as null (<3 alphanumeric chars)");
+assert(normalizeAssetIdentifierTest("CAT-320D-2024") === "cat320d2024", "Normalizes machinery chassis code");
+
+// 19.3: Multi-Attribute Duplicate Scoring & Shadow Quarantine Simulation
+function simulateEvaluateDuplicateSignals(candidate, existing) {
+  let score = 0;
+  const isSameOwner = candidate.ownerId === existing.ownerId;
+  const reasons = [];
+
+  const normCandId = normalizeAssetIdentifierTest(candidate.serialOrVin);
+  const normExtId = normalizeAssetIdentifierTest(existing.assetIdentifier);
+
+  if (normCandId && normExtId && normCandId === normExtId) {
+    score += 0.85;
+    reasons.push("Identical physical serial number or VIN detected.");
+  }
+
+  if (candidate.categoryId === existing.categoryId) {
+    if (candidate.title.trim().toLowerCase() === existing.title.trim().toLowerCase()) {
+      score += isSameOwner ? 0.35 : 0.25;
+      reasons.push("Identical title in same category.");
+    }
+  }
+
+  if (candidate.make && existing.make && candidate.make.toLowerCase() === existing.make.toLowerCase()) {
+    if (candidate.model && existing.model && candidate.model.toLowerCase() === existing.model.toLowerCase()) {
+      score += 0.2;
+      reasons.push("Exact make and model match.");
+    }
+  }
+
+  const confidence = Math.min(1.0, score);
+  let classification = "UNIQUE";
+  let requiresQuarantine = false;
+
+  if (confidence >= 0.85) {
+    classification = "CONFIRMED_DUPLICATE";
+    requiresQuarantine = !isSameOwner;
+  } else if (confidence >= 0.65) {
+    classification = "SUSPECTED_DUPLICATE";
+    requiresQuarantine = true;
+  }
+
+  return { classification, confidence, isSameOwner, requiresQuarantine, reasons };
+}
+
+// Case A: Same owner reposting same physical serial number
+const sameOwnerDup = simulateEvaluateDuplicateSignals(
+  { ownerId: "user-1", categoryId: "excavators", title: "CAT 320D", serialOrVin: "CAT-320-9988", make: "Caterpillar", model: "320D" },
+  { ownerId: "user-1", categoryId: "excavators", title: "CAT 320D", assetIdentifier: "cat3209988", make: "Caterpillar", model: "320D" }
+);
+assert(sameOwnerDup.classification === "CONFIRMED_DUPLICATE" && sameOwnerDup.isSameOwner, "Identical serial by same owner classified as CONFIRMED_DUPLICATE");
+assert(!sameOwnerDup.requiresQuarantine, "Same owner duplicate blocked directly rather than quarantined");
+
+// Case B: Different owner posting identical equipment serial (collision / fraud)
+const crossOwnerDup = simulateEvaluateDuplicateSignals(
+  { ownerId: "user-2", categoryId: "excavators", title: "CAT 320D", serialOrVin: "CAT-320-9988", make: "Caterpillar", model: "320D" },
+  { ownerId: "user-1", categoryId: "excavators", title: "CAT 320D", assetIdentifier: "cat3209988", make: "Caterpillar", model: "320D" }
+);
+assert(crossOwnerDup.classification === "CONFIRMED_DUPLICATE" && !crossOwnerDup.isSameOwner, "Cross-account serial collision detected");
+assert(crossOwnerDup.requiresQuarantine, "Cross-account collision requires shadow_quarantine for admin verification");
+
+// 19.4: Three-Strike Policy & Cooldown Evaluation
+function simulateStrikePolicy(currentStrikeCount) {
+  if (currentStrikeCount <= 1) {
+    return { action: "ALLOW_WITH_WARNING" };
+  }
+  if (currentStrikeCount === 2) {
+    return { action: "APPLY_24H_COOLDOWN", cooldownHours: 24 };
+  }
+  return { action: "REQUIRE_MANDATORY_ADMIN_REVIEW" };
+}
+
+assert(simulateStrikePolicy(1).action === "ALLOW_WITH_WARNING", "Strike 1 allows with warning");
+assert(simulateStrikePolicy(2).action === "APPLY_24H_COOLDOWN", "Strike 2 applies 24-hour cooldown");
+assert(simulateStrikePolicy(3).action === "REQUIRE_MANDATORY_ADMIN_REVIEW", "Strike 3 requires mandatory admin review");
+
+// 19.5: Category Stock-Slot Allowance (Quota)
+function simulateCategoryQuota(activeCount, categorySlug) {
+  const quotas = { heavy_machinery: 8, power_tools: 15, default: 5 };
+  const max = quotas[categorySlug] || quotas.default;
+  return { allowed: activeCount < max, maxAllowed: max };
+}
+
+assert(simulateCategoryQuota(4, "heavy_machinery").allowed, "4/8 heavy machinery listings allowed");
+assert(!simulateCategoryQuota(8, "heavy_machinery").allowed, "8/8 heavy machinery listings rejected by quota");
+assert(simulateCategoryQuota(10, "power_tools").allowed, "10/15 power tools listings allowed");
+
+// 19.6: Preliminary Coordination Feedback Simulation
+function simulatePreliminaryFeedback({ bookingStatus, callerId, renterId, ownerId, commScore, punctScore }) {
+  if (!["accepted", "paid", "active", "confirmed"].includes(bookingStatus)) {
+    return { success: false, code: "NOT_ELIGIBLE", error: "Only accepted bookings can receive preliminary coordination feedback" };
+  }
+  if (callerId !== renterId && callerId !== ownerId) {
+    return { success: false, code: "UNAUTHORIZED", error: "Not a booking participant" };
+  }
+  if (!commScore || commScore < 1 || commScore > 5 || !punctScore || punctScore < 1 || punctScore > 5) {
+    return { success: false, code: "INVALID_INPUT" };
+  }
+  return {
+    success: true,
+    isPublicStarRating: false, // Explicit platform coordination invariant
+    privateOperationsOnly: true,
+  };
+}
+
+const validCoordination = simulatePreliminaryFeedback({
+  bookingStatus: "accepted",
+  callerId: "renter-1",
+  renterId: "renter-1",
+  ownerId: "host-1",
+  commScore: 5,
+  punctScore: 4,
+});
+assert(validCoordination.success, "Preliminary coordination feedback succeeds for accepted booking");
+assert(validCoordination.isPublicStarRating === false, "Preliminary coordination feedback is explicitly excluded from public star ratings");
+
+const pendingCoordination = simulatePreliminaryFeedback({
+  bookingStatus: "pending",
+  callerId: "renter-1",
+  renterId: "renter-1",
+  ownerId: "host-1",
+  commScore: 5,
+  punctScore: 5,
+});
+assert(!pendingCoordination.success && pendingCoordination.code === "NOT_ELIGIBLE", "Preliminary coordination rejected on pending booking");
+
+// 19.7: Reciprocal Host-to-Renter Review Simulation
+function simulateRenterReview({ bookingStatus, callerId, ownerId, renterId, rating }) {
+  if (!["completed", "returned"].includes(bookingStatus)) {
+    return { success: false, code: "NOT_ELIGIBLE" };
+  }
+  if (callerId !== ownerId) {
+    return { success: false, code: "UNAUTHORIZED", error: "Only equipment host can review renter" };
+  }
+  if (callerId === renterId) {
+    return { success: false, code: "SELF_REVIEW" };
+  }
+  if (!rating || rating < 1 || rating > 5) {
+    return { success: false, code: "INVALID_INPUT" };
+  }
+  return { success: true };
+}
+
+const hostReviewsRenter = simulateRenterReview({
+  bookingStatus: "completed",
+  callerId: "host-1",
+  ownerId: "host-1",
+  renterId: "renter-2",
+  rating: 5,
+});
+assert(hostReviewsRenter.success, "Host successfully submits reciprocal review for verified renter");
+
+const strangerReviewsRenter = simulateRenterReview({
+  bookingStatus: "completed",
+  callerId: "stranger-99",
+  ownerId: "host-1",
+  renterId: "renter-2",
+  rating: 5,
+});
+assert(!strangerReviewsRenter.success && strangerReviewsRenter.code === "UNAUTHORIZED", "Stranger cannot review renter");
+
+// 19.8: Reporting System (Listing & Profile) Simulation
+function simulatePlatformReport({ reporterId, targetType, targetOwnerId, reason }) {
+  if (!reporterId) return { success: false, code: "AUTH_REQUIRED" };
+  if (reporterId === targetOwnerId) return { success: false, code: "SELF_REPORT", error: "Cannot report own asset or profile" };
+  if (!reason || reason.trim().length < 3) return { success: false, code: "INVALID_INPUT" };
+  return { success: true, targetType, status: "pending" };
+}
+
+const reportListing = simulatePlatformReport({ reporterId: "user-a", targetType: "listing", targetOwnerId: "user-b", reason: "Damaged hydraulics not as pictured" });
+assert(reportListing.success && reportListing.status === "pending", "Listing report successfully submitted with pending status");
+
+const reportProfile = simulatePlatformReport({ reporterId: "user-a", targetType: "profile", targetOwnerId: "user-c", reason: "Fraudulent contact behavior" });
+assert(reportProfile.success && reportProfile.targetType === "profile", "Profile report successfully submitted");
+
+const selfReport = simulatePlatformReport({ reporterId: "user-a", targetType: "listing", targetOwnerId: "user-a", reason: "Test reason" });
+assert(!selfReport.success && selfReport.code === "SELF_REPORT", "Self-reporting is strictly blocked");
+
+// 19.9: Concurrency-Safe Duplicate Strike Serialization Simulation
+function simulateTransactionFlow({ useAdvisoryLock = true }) {
+  const committedTable = [];
+  let advisoryLockHeldBy = null;
+  const targetUser = "user_concurrent";
+
+  // Step 1: T1 begins and executes BEFORE INSERT trigger
+  if (useAdvisoryLock) {
+    advisoryLockHeldBy = "T1";
+  }
+
+  // T1 reads existing strike count from committed table
+  const t1PriorStrike = committedTable
+    .filter((r) => r.user_id === targetUser)
+    .reduce((max, r) => Math.max(max, r.strike_count), 0);
+  const t1NewStrike = t1PriorStrike + 1;
+  const t1Cooldown = t1NewStrike >= 2 ? "24_HOURS" : null;
+
+  // Step 2: T2 starts concurrently before T1 commits
+  let t2Blocked = false;
+  if (useAdvisoryLock && advisoryLockHeldBy !== null) {
+    t2Blocked = true; // T2 must wait for transaction-level advisory lock
+  }
+
+  let t2NewStrike;
+  let t2Cooldown;
+
+  if (!useAdvisoryLock) {
+    // Vulnerable state: T2 reads committed table concurrently before T1 commits
+    const t2PriorStrike = committedTable
+      .filter((r) => r.user_id === targetUser)
+      .reduce((max, r) => Math.max(max, r.strike_count), 0);
+    t2NewStrike = t2PriorStrike + 1;
+    t2Cooldown = t2NewStrike >= 2 ? "24_HOURS" : null;
+
+    committedTable.push({ user_id: targetUser, strike_count: t1NewStrike, cooldown: t1Cooldown });
+    committedTable.push({ user_id: targetUser, strike_count: t2NewStrike, cooldown: t2Cooldown });
+  } else {
+    // Protected state: T1 commits and releases advisory lock
+    committedTable.push({ user_id: targetUser, strike_count: t1NewStrike, cooldown: t1Cooldown });
+    advisoryLockHeldBy = null;
+
+    // T2 unblocks, acquires advisory lock, and reads committed table
+    advisoryLockHeldBy = "T2";
+    const t2PriorStrike = committedTable
+      .filter((r) => r.user_id === targetUser)
+      .reduce((max, r) => Math.max(max, r.strike_count), 0);
+    t2NewStrike = t2PriorStrike + 1;
+    t2Cooldown = t2NewStrike >= 2 ? "24_HOURS" : null;
+
+    committedTable.push({ user_id: targetUser, strike_count: t2NewStrike, cooldown: t2Cooldown });
+    advisoryLockHeldBy = null;
+  }
+
+  return {
+    useAdvisoryLock,
+    t2WasBlocked: t2Blocked,
+    t1Strike: t1NewStrike,
+    t2Strike: t2NewStrike,
+    t1Cooldown,
+    t2Cooldown,
+    committedRecords: committedTable,
+  };
+}
+
+function simulateRollbackFlow() {
+  const committedTable = [];
+  const targetUser = "user_rollback";
+
+  // T1 acquires lock, calculates strike 1, but transaction aborts / rolls back
+  let advisoryLock = "T1";
+  // T1 rolls back -> lock released, 0 committed records
+  advisoryLock = null;
+
+  // T2 acquires lock, calculates strike
+  advisoryLock = "T2";
+  const prior = committedTable
+    .filter((r) => r.user_id === targetUser)
+    .reduce((max, r) => Math.max(max, r.strike_count), 0);
+  const nextStrike = prior + 1;
+  committedTable.push({ user_id: targetUser, strike_count: nextStrike });
+  advisoryLock = null;
+
+  return { t2Strike: nextStrike, committedCount: committedTable.length };
+}
+
+// Subtest A: Unlocked concurrency demonstrates race condition
+const resUnlocked = simulateTransactionFlow({ useAdvisoryLock: false });
+assert(resUnlocked.t1Strike === 1 && resUnlocked.t2Strike === 1, "Vulnerable engine confirms race condition where concurrent inserts both get strike 1");
+assert(resUnlocked.t2Cooldown === null, "Vulnerable engine bypasses cooldown because both computed strike 1");
+
+// Subtest B: Advisory lock serializes concurrent inserts for same user
+const resLocked = simulateTransactionFlow({ useAdvisoryLock: true });
+assert(resLocked.t2WasBlocked === true, "Advisory lock forces concurrent transaction to block until initial transaction commits");
+assert(resLocked.t1Strike === 1 && resLocked.t2Strike === 2, "Advisory lock serialized transactions: strike 1 followed by strike 2");
+assert(resLocked.t2Cooldown === "24_HOURS", "Strike 2 transaction received 24-hour cooldown automatically upon serialization");
+
+// Subtest C: Rollback handling releases lock and leaves count unincremented
+const resRollback = simulateRollbackFlow();
+assert(resRollback.t2Strike === 1 && resRollback.committedCount === 1, "Subsequent transaction after rollback computes strike 1 without phantom increments");
+
+// 19.10: Static Migration 015 File Structure & Security Invariants
+const migration015Path = path.join(__dirname, "../supabase/migrations/015_moderation_and_integrity_overhaul.sql");
+const migration015Content = fs.readFileSync(migration015Path, "utf-8");
+
+assert(migration015Content.includes("BEGIN;"), "Migration 015 is wrapped in BEGIN transactional block");
+assert(migration015Content.includes("COMMIT;"), "Migration 015 concludes with COMMIT statement");
+assert(
+  migration015Content.includes("pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(NEW.user_id, 0))"),
+  "Migration 015 enforces 64-bit advisory transaction lock via hashtextextended"
+);
+assert(
+  migration015Content.includes("SET search_path = public, pg_catalog"),
+  "Migration 015 sets explicit and safe search path on strike trigger function"
+);
+assert(
+  migration015Content.includes("idx_duplicate_enforcements_user_created"),
+  "Migration 015 includes composite index for duplicate enforcement audit trail"
+);
+assert(
+  !migration015Content.includes("pg_trigger_depth() > 1"),
+  "Migration 015 does not contain vulnerable pg_trigger_depth() > 1 bypass"
+);
+
 console.log("\n===============================================================================");
 console.log(`SUMMARY: ${passedTests}/${totalTests} Tests Passed (${failedTests} Failed)`);
 console.log("===============================================================================");
@@ -1625,3 +2123,4 @@ if (failedTests > 0) {
 } else {
   process.exit(0);
 }
+

@@ -327,6 +327,8 @@ export interface DashboardBookingItem {
   created_at: string;
   listing?: MarketplaceListingItem | null;
   is_reviewed?: boolean;
+  renter_name?: string | null;
+  lister_name?: string | null;
 }
 
 export async function getUserRentals(userId: string): Promise<DashboardBookingItem[]> {
@@ -346,7 +348,33 @@ export async function getUserRentals(userId: string): Promise<DashboardBookingIt
       .order("created_at", { ascending: false });
 
     if (!error && data) {
-      // Check which completed/returned bookings have already been reviewed
+      // 1. Resolve host/lister names for renter dashboard cards & review modal
+      const ownerIds = Array.from(
+        new Set(
+          data
+            .map((b) => (b.listing as unknown as { owner_id?: string } | null)?.owner_id)
+            .filter((id): id is string => Boolean(id))
+        )
+      );
+
+      const ownerNameMap = new Map<string, string>();
+      if (ownerIds.length > 0) {
+        const { data: ownerProfiles } = await supabase
+          .from("profiles")
+          .select("clerk_user_id, first_name, last_name")
+          .in("clerk_user_id", ownerIds);
+
+        if (ownerProfiles) {
+          for (const p of ownerProfiles) {
+            const name = [p.first_name, p.last_name].filter(Boolean).join(" ").trim();
+            if (name) {
+              ownerNameMap.set(p.clerk_user_id, name);
+            }
+          }
+        }
+      }
+
+      // 2. Check which completed/returned bookings have already been reviewed
       const completedBookingIds = data
         .filter((b) => b.status === "completed" || b.status === "returned")
         .map((b) => b.id);
@@ -366,10 +394,15 @@ export async function getUserRentals(userId: string): Promise<DashboardBookingIt
         }
       }
 
-      return data.map((b) => ({
-        ...(b as unknown as DashboardBookingItem),
-        is_reviewed: reviewedSet.has(b.id),
-      }));
+      return data.map((b) => {
+        const ownerId = (b.listing as unknown as { owner_id?: string } | null)?.owner_id;
+        const listerName = ownerId ? ownerNameMap.get(ownerId) || null : null;
+        return {
+          ...(b as unknown as DashboardBookingItem),
+          is_reviewed: reviewedSet.has(b.id),
+          lister_name: listerName,
+        };
+      });
     }
     if (error) {
       console.warn("[supabase] Error fetching user rentals:", error.message);
@@ -393,7 +426,7 @@ export async function getUserListingsAndIncoming(userId: string): Promise<{
   try {
     const supabase = await createSupabaseServerClient();
 
-    // 1. Fetch user's listings (excluding soft-deleted)
+    // 1. Fetch user's listings (excluding soft-deleted and archived listings)
     const { data: listData, error: listError } = await supabase
       .from("listings")
       .select(`
@@ -402,7 +435,7 @@ export async function getUserListingsAndIncoming(userId: string): Promise<{
         listing_images(*)
       `)
       .eq("owner_id", userId)
-      .neq("status", "deleted")
+      .not("status", "in", '("deleted","archived")')
       .order("created_at", { ascending: false });
 
     if (!listError && listData) {
@@ -429,12 +462,41 @@ export async function getUserListingsAndIncoming(userId: string): Promise<{
 
       if (!bkError && bkData) {
         const allBookings = bkData as unknown as DashboardBookingItem[];
+
+        // 3. Resolve readable renter names from profiles (prevent raw Clerk user IDs in UI)
+        const renterIds = Array.from(
+          new Set(allBookings.map((b) => b.renter_id).filter(Boolean))
+        );
+        const renterNameMap = new Map<string, string>();
+        if (renterIds.length > 0) {
+          const { data: renterProfiles } = await supabase
+            .from("profiles")
+            .select("clerk_user_id, first_name, last_name")
+            .in("clerk_user_id", renterIds);
+
+          if (renterProfiles) {
+            for (const p of renterProfiles) {
+              const name = [p.first_name, p.last_name].filter(Boolean).join(" ").trim();
+              if (name) {
+                renterNameMap.set(p.clerk_user_id, name);
+              }
+            }
+          }
+        }
+
+        const enrichedBookings: DashboardBookingItem[] = allBookings.map((b) => ({
+          ...b,
+          renter_name:
+            renterNameMap.get(b.renter_id) ||
+            (b.renter_id.startsWith("mock-") ? "Demo Renter" : "Verified Renter"),
+        }));
+
         // Active / pending booking requests (holding or requesting unit)
-        incomingBookings = allBookings.filter((b) =>
+        incomingBookings = enrichedBookings.filter((b) =>
           ["pending", "accepted", "paid", "active"].includes(b.status)
         );
         // Completed rental history records
-        rentalHistory = allBookings.filter((b) =>
+        rentalHistory = enrichedBookings.filter((b) =>
           ["completed", "returned"].includes(b.status)
         );
 

@@ -108,13 +108,24 @@ export function Navbar() {
                   Dashboard
                 </Button>
               </Link>
-              <UserButton
-                appearance={{
-                  elements: {
-                    userButtonAvatarBox: "h-8 w-8 ring-2 ring-primary/20",
-                  },
-                }}
-              />
+              <div className="flex items-center gap-2 pl-1 border-l border-border/60">
+                <div className="hidden lg:flex flex-col text-right">
+                  <span className="text-xs font-semibold text-foreground leading-tight">
+                    {user?.username ? `@${user.username}` : (user?.fullName || user?.firstName || user?.primaryEmailAddress?.emailAddress?.split("@")[0] || "User")}
+                  </span>
+                  <span className="text-[10px] text-muted-foreground leading-none">
+                    {user?.primaryEmailAddress?.emailAddress ?? ""}
+                  </span>
+                </div>
+                <UserButton
+                  showName={false}
+                  appearance={{
+                    elements: {
+                      userButtonAvatarBox: "h-8 w-8 ring-2 ring-primary/20",
+                    },
+                  }}
+                />
+              </div>
             </div>
           ) : (
             <>
@@ -135,7 +146,14 @@ export function Navbar() {
 
         {/* Mobile menu button */}
         <div className="flex md:hidden items-center gap-2">
-          {isSignedIn && <UserButton />}
+          {isSignedIn && (
+            <div className="flex items-center gap-1.5">
+              <span className="text-xs font-medium text-foreground max-w-[100px] truncate">
+                {user?.username ? `@${user.username}` : (user?.firstName || user?.primaryEmailAddress?.emailAddress?.split("@")[0] || "")}
+              </span>
+              <UserButton />
+            </div>
+          )}
           <Button
             variant="ghost"
             size="icon"
