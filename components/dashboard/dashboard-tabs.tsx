@@ -176,6 +176,7 @@ export function DashboardTabs({
   const handleCancelBooking = async (bookingId: string) => {
     if (!confirm("Are you sure you want to cancel this reservation?")) return;
 
+    const previousRentals = rentals;
     setLoadingActions((prev) => ({ ...prev, [bookingId]: true }));
     try {
       setRentals((prev) =>
@@ -186,12 +187,15 @@ export function DashboardTabs({
 
       const res = await updateBookingStatusAction(bookingId, "cancelled");
       if (res.error) {
+        setRentals(previousRentals);
         showNotification(res.error, "info");
       } else {
         showNotification("Reservation cancelled successfully.", "info");
       }
     } catch (err) {
+      setRentals(previousRentals);
       console.error("Cancel booking error:", err);
+      showNotification("Failed to cancel reservation. Please try again.", "info");
     } finally {
       setLoadingActions((prev) => ({ ...prev, [bookingId]: false }));
     }
@@ -199,6 +203,7 @@ export function DashboardTabs({
 
   // Accept booking request (from Owner tab)
   const handleAcceptRequest = async (bookingId: string) => {
+    const previousIncoming = incomingBookings;
     setLoadingActions((prev) => ({ ...prev, [bookingId]: true }));
     try {
       setIncomingBookings((prev) =>
@@ -209,12 +214,15 @@ export function DashboardTabs({
 
       const res = await updateBookingStatusAction(bookingId, "accepted");
       if (res.error) {
+        setIncomingBookings(previousIncoming);
         showNotification(res.error, "info");
       } else {
         showNotification("Booking request accepted! Renter notified.", "success");
       }
     } catch (err) {
+      setIncomingBookings(previousIncoming);
       console.error("Accept request error:", err);
+      showNotification("Failed to accept booking request. Please try again.", "info");
     } finally {
       setLoadingActions((prev) => ({ ...prev, [bookingId]: false }));
     }
@@ -224,6 +232,7 @@ export function DashboardTabs({
   const handleDeclineRequest = async (bookingId: string) => {
     if (!confirm("Decline this booking request? The dates will be released.")) return;
 
+    const previousIncoming = incomingBookings;
     setLoadingActions((prev) => ({ ...prev, [bookingId]: true }));
     try {
       setIncomingBookings((prev) =>
@@ -234,12 +243,15 @@ export function DashboardTabs({
 
       const res = await updateBookingStatusAction(bookingId, "cancelled");
       if (res.error) {
+        setIncomingBookings(previousIncoming);
         showNotification(res.error, "info");
       } else {
         showNotification("Booking request declined.", "info");
       }
     } catch (err) {
+      setIncomingBookings(previousIncoming);
       console.error("Decline request error:", err);
+      showNotification("Failed to decline booking request. Please try again.", "info");
     } finally {
       setLoadingActions((prev) => ({ ...prev, [bookingId]: false }));
     }
@@ -247,6 +259,7 @@ export function DashboardTabs({
 
   // Toggle listing availability action (Owner controls available <-> inactive)
   const handleToggleAvailability = async (listingId: string) => {
+    const previousListings = listings;
     setLoadingActions((prev) => ({ ...prev, [listingId]: true }));
     try {
       const currentListing = listings.find((l) => l.id === listingId);
@@ -265,13 +278,7 @@ export function DashboardTabs({
       if (res.error) {
         showNotification(res.error, "info");
         // Revert
-        setListings((prev) =>
-          prev.map((item) =>
-            item.id === listingId
-              ? { ...item, status: willBeAvailable ? "inactive" : "available" }
-              : item
-          )
-        );
+        setListings(previousListings);
       } else {
         showNotification(
           res.newStatus === "available"
@@ -281,7 +288,9 @@ export function DashboardTabs({
         );
       }
     } catch (err) {
+      setListings(previousListings);
       console.error("Toggle listing availability error:", err);
+      showNotification("Failed to update listing availability. Please try again.", "info");
     } finally {
       setLoadingActions((prev) => ({ ...prev, [listingId]: false }));
     }
@@ -291,17 +300,21 @@ export function DashboardTabs({
   const handleDeleteListing = async (listingId: string) => {
     if (!confirm("Are you sure you want to remove this listing?")) return;
 
+    const previousListings = listings;
     setLoadingActions((prev) => ({ ...prev, [listingId]: true }));
     try {
       setListings((prev) => prev.filter((item) => item.id !== listingId));
       const res = await deleteUserListingAction(listingId);
       if (res.error) {
+        setListings(previousListings);
         showNotification(res.error, "info");
       } else {
         showNotification("Listing removed successfully.", "success");
       }
     } catch (err) {
+      setListings(previousListings);
       console.error("Delete listing error:", err);
+      showNotification("Failed to remove listing. Please try again.", "info");
     } finally {
       setLoadingActions((prev) => ({ ...prev, [listingId]: false }));
     }

@@ -322,12 +322,18 @@ export function NewListingForm({ categories, userId }: NewListingFormProps) {
             if (fileUploadSucceeded && filePublicUrl) {
               uploadedImageUrls.push(filePublicUrl);
             } else {
-              // If bucket is not created or upload failed, use placeholder rather than an invalid blob: URL
-              uploadedImageUrls.push("/images/equipment_loader.jpg");
+              const failureMsg = uploadError?.message || "Storage service error.";
+              console.error("[storage] Photo upload failed for file:", item.file.name, failureMsg);
+              setSubmitError(`Failed to upload photo "${item.file.name}". ${failureMsg}`);
+              setIsSubmitting(false);
+              return;
             }
           } catch (storageErr) {
-            console.warn("[storage] Direct upload exception:", storageErr);
-            uploadedImageUrls.push("/images/equipment_loader.jpg");
+            console.error("[storage] Direct upload exception:", storageErr);
+            const failureMsg = storageErr instanceof Error ? storageErr.message : "Network error during upload.";
+            setSubmitError(`Failed to upload photo "${item.file.name}". ${failureMsg}`);
+            setIsSubmitting(false);
+            return;
           }
         } else if (item.previewUrl && !item.previewUrl.startsWith("blob:")) {
           // Direct external URL

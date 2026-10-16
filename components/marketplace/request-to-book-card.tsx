@@ -87,6 +87,16 @@ export function RequestToBookCard({
   const [errorCode, setErrorCode] = React.useState<string | null>(null);
   const [bookedConfirmationId, setBookedConfirmationId] = React.useState<string | null>(null);
 
+  // Separate mock/demo listings from real UUID database listings
+  const isDemoListing = React.useMemo(() => {
+    if (!listingId) return false;
+    return (
+      listingId.startsWith("lst-") ||
+      listingId.startsWith("mock-") ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(listingId)
+    );
+  }, [listingId]);
+
   // Helper to determine if a specific date is disabled in calendar
   const isDateDisabled = React.useCallback(
     (date: Date) => {
@@ -161,6 +171,12 @@ export function RequestToBookCard({
     e.preventDefault();
     setServerError(null);
     setErrorCode(null);
+
+    if (isDemoListing) {
+      setServerError("This is a demonstration listing and cannot accept rental bookings. Please select an active marketplace listing.");
+      setErrorCode("DEMO_LISTING");
+      return;
+    }
 
     if (!startDate || !endDate) {
       setServerError("Please select both a start date and an end date.");
@@ -279,6 +295,13 @@ export function RequestToBookCard({
       ) : (
         /* Booking Form */
         <form onSubmit={handleRequestToBook} className="mt-5 space-y-4">
+          {isDemoListing && (
+            <div className="rounded-xl border border-sky-500/30 bg-sky-500/10 p-3 text-xs text-sky-700 dark:text-sky-300 flex items-center gap-2">
+              <AlertCircle className="h-4 w-4 shrink-0" />
+              <span>This is a demonstration listing for preview purposes and cannot accept rental bookings.</span>
+            </div>
+          )}
+
           {listingStatus !== "available" && (
             <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-700 dark:text-amber-300 flex items-center gap-2">
               <AlertCircle className="h-4 w-4 shrink-0" />
@@ -428,7 +451,8 @@ export function RequestToBookCard({
               isSubmitting ||
               hasRangeConflict ||
               durationDays === 0 ||
-              listingStatus !== "available"
+              listingStatus !== "available" ||
+              isDemoListing
             }
             className="w-full font-bold shadow-lg shadow-primary/20 h-12 text-base mt-2 cursor-pointer"
           >
@@ -437,6 +461,8 @@ export function RequestToBookCard({
                 <Loader2 className="mr-2 h-4 w-4 animate-spin" />
                 Submitting Request...
               </>
+            ) : isDemoListing ? (
+              "Demo Listing (Booking Unavailable)"
             ) : listingStatus !== "available" ? (
               "Not Available for Rent"
             ) : (

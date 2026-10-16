@@ -70,11 +70,10 @@ export function Navbar() {
             <Link
               key={link.name}
               href={link.href}
-              className={`rounded-md px-3 py-2 text-sm font-medium transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
-                link.isActive
+              className={`rounded-md px-3 py-2 text-sm font-medium transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${link.isActive
                   ? "text-primary font-semibold"
                   : "text-muted-foreground"
-              }`}
+                }`}
             >
               {link.name}
             </Link>
@@ -163,11 +162,10 @@ export function Navbar() {
                 key={link.name}
                 href={link.href}
                 onClick={() => setMobileMenuOpen(false)}
-                className={`rounded-lg px-3 py-2.5 text-base font-medium transition-colors hover:bg-muted ${
-                  link.isActive
+                className={`rounded-lg px-3 py-2.5 text-base font-medium transition-colors hover:bg-muted ${link.isActive
                     ? "text-primary font-semibold"
                     : "text-foreground"
-                }`}
+                  }`}
               >
                 {link.name}
               </Link>

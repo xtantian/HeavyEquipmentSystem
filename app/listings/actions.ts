@@ -216,6 +216,32 @@ export async function createListingAction(
       };
     }
 
+    // 6. Populate listing_images relation table with ordering and deduplication
+    const seenUrls = new Set<string>();
+    const uniqueImages = finalImages.filter((url) => {
+      const trimmed = (url || "").trim();
+      if (!trimmed || seenUrls.has(trimmed)) return false;
+      seenUrls.add(trimmed);
+      return true;
+    });
+
+    if (uniqueImages.length > 0) {
+      const relationRows = uniqueImages.map((imageUrl, idx) => ({
+        listing_id: inserted.id,
+        image_url: imageUrl,
+        is_primary: idx === 0,
+        sort_order: idx,
+      }));
+
+      const { error: imagesError } = await supabase
+        .from("listing_images")
+        .insert(relationRows);
+
+      if (imagesError) {
+        console.warn("[createListingAction] Warning inserting listing_images:", imagesError.message);
+      }
+    }
+
     revalidatePath("/listings");
     revalidatePath("/dashboard");
     revalidatePath("/dashboard/equipment");
