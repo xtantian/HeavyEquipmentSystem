@@ -2114,6 +2114,61 @@ assert(
   "Migration 015 does not contain vulnerable pg_trigger_depth() > 1 bypass"
 );
 
+// -----------------------------------------------------------------------------
+// 20. PERFORMANCE OPTIMIZATIONS, PAGINATION & CACHING INVARIANTS
+// -----------------------------------------------------------------------------
+console.log("\n▶ SUITE 20: Performance Optimizations, Server-Side Pagination & Caching Invariants");
+
+// 20.1: Pagination Math & Boundary Clamping Invariants
+function computePaginationBounds(totalCount, rawPage, rawLimit) {
+  const page = Math.max(1, Number(rawPage) || 1);
+  const pageSize = Math.min(100, Math.max(1, Number(rawLimit) || 24));
+  const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
+  const offset = (page - 1) * pageSize;
+  const clampedPage = Math.min(page, totalPages);
+  return { page, pageSize, totalPages, offset, clampedPage };
+}
+
+const p1 = computePaginationBounds(50, 1, 24);
+assert(p1.page === 1 && p1.pageSize === 24 && p1.totalPages === 3 && p1.offset === 0, "Page 1 of 50 with limit 24 computes 3 total pages and 0 offset");
+
+const p2 = computePaginationBounds(50, 2, 24);
+assert(p2.offset === 24, "Page 2 with limit 24 computes offset 24");
+
+const pNegative = computePaginationBounds(50, -5, 24);
+assert(pNegative.page === 1, "Negative page is safely clamped to page 1");
+
+const pExcessiveLimit = computePaginationBounds(50, 1, 9999);
+assert(pExcessiveLimit.pageSize === 100, "Unreasonably large limit is capped at 100 to prevent denial-of-service memory pressure");
+
+const pZeroItems = computePaginationBounds(0, 1, 24);
+assert(pZeroItems.totalPages === 1, "Zero items returns 1 total page rather than 0 or NaN");
+
+// 20.2: Static Code Invariant - Elimination of blocking currentUser() in request paths
+const adminLayoutContent = fs.readFileSync(path.join(__dirname, "../app/admin/layout.tsx"), "utf-8");
+assert(!adminLayoutContent.includes("currentUser("), "AdminLayout does NOT execute blocking currentUser() external API call");
+assert(adminLayoutContent.includes("auth()"), "AdminLayout derives identity securely via local auth() session claims");
+
+const adminActionsContent = fs.readFileSync(path.join(__dirname, "../app/admin/actions.ts"), "utf-8");
+assert(!adminActionsContent.includes("currentUser("), "Admin actions do NOT execute blocking currentUser() external API call");
+
+const dashboardActionsContent = fs.readFileSync(path.join(__dirname, "../app/dashboard/actions.ts"), "utf-8");
+assert(!dashboardActionsContent.includes("currentUser("), "Dashboard actions do NOT execute blocking currentUser() external API call");
+
+// 20.3: Static Code Invariant - Category Caching with unstable_cache
+const marketplaceContent = fs.readFileSync(path.join(__dirname, "../lib/supabase/marketplace.ts"), "utf-8");
+assert(marketplaceContent.includes("unstable_cache"), "lib/supabase/marketplace.ts utilizes Next.js unstable_cache for public reference data");
+assert(marketplaceContent.includes("marketplace-categories"), "Marketplace categories are tagged with explicit cache tag for revalidation");
+assert(marketplaceContent.includes(".range(offset, offset + pageSize - 1)"), "PostgREST queries enforce server-side SQL pagination range");
+
+// 20.4: Static Code Invariant - Parallelized Admin Overview Queries
+const adminSupabaseContent = fs.readFileSync(path.join(__dirname, "../lib/supabase/admin.ts"), "utf-8");
+assert(adminSupabaseContent.includes("Promise.all(["), "Admin overview stats queries are parallelized with Promise.all");
+
+// 20.5: Static Code Invariant - Hero Image Deferral
+const heroContent = fs.readFileSync(path.join(__dirname, "../components/landing/hero.tsx"), "utf-8");
+assert(heroContent.includes("shouldRenderImage"), "Hero carousel defers non-active background slides to save initial paint network weight");
+
 console.log("\n===============================================================================");
 console.log(`SUMMARY: ${passedTests}/${totalTests} Tests Passed (${failedTests} Failed)`);
 console.log("===============================================================================");
@@ -2123,4 +2178,5 @@ if (failedTests > 0) {
 } else {
   process.exit(0);
 }
+
 

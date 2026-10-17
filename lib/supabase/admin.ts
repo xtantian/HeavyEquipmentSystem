@@ -123,11 +123,23 @@ export async function getAdminOverviewStats(): Promise<AdminOverviewStats> {
   try {
     const supabase = await getAdminSupabaseClient();
 
-    // 1. Users / Profiles statistics
-    const { data: profilesData, error: profilesError } = await supabase
-      .from("profiles")
-      .select("id, clerk_user_id, status, updated_at");
+    // Parallelize all 4 independent overview statistics queries in a single round-trip
+    const [
+      { data: profilesData, error: profilesError },
+      { data: listingsData, error: listingsError },
+      { count: reportsCount },
+      { data: bookingsData, error: bookingsError },
+    ] = await Promise.all([
+      supabase.from("profiles").select("id, status, updated_at"),
+      supabase.from("listings").select("id, status, is_reported"),
+      supabase
+        .from("listing_reports")
+        .select("*", { count: "exact", head: true })
+        .eq("status", "pending"),
+      supabase.from("bookings").select("id, renter_id, status"),
+    ]);
 
+    // 1. Process Users / Profiles statistics
     if (!profilesError && profilesData) {
       stats.totalRegisteredUsers = profilesData.length;
       const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
@@ -144,11 +156,7 @@ export async function getAdminOverviewStats(): Promise<AdminOverviewStats> {
       }
     }
 
-    // 2. Listings statistics
-    const { data: listingsData, error: listingsError } = await supabase
-      .from("listings")
-      .select("id, status, is_reported");
-
+    // 2. Process Listings statistics
     if (!listingsError && listingsData) {
       for (const item of listingsData) {
         const s = item.status as keyof typeof stats.listingsByStatus;
@@ -164,21 +172,12 @@ export async function getAdminOverviewStats(): Promise<AdminOverviewStats> {
       }
     }
 
-    // 3. Reports count from listing_reports table
-    const { count: reportsCount } = await supabase
-      .from("listing_reports")
-      .select("*", { count: "exact", head: true })
-      .eq("status", "pending");
-
+    // 3. Process Reports count from listing_reports table
     if (reportsCount !== null && reportsCount !== undefined && reportsCount > 0) {
       stats.totalReportedListings = Math.max(stats.totalReportedListings, reportsCount);
     }
 
-    // 4. Rentals / Bookings statistics
-    const { data: bookingsData, error: bookingsError } = await supabase
-      .from("bookings")
-      .select("id, renter_id, status");
-
+    // 4. Process Rentals / Bookings statistics
     if (!bookingsError && bookingsData) {
       const uniqueRenters = new Set<string>();
 

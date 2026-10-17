@@ -1,6 +1,6 @@
 "use server";
 
-import { auth, currentUser } from "@clerk/nextjs/server";
+import { auth } from "@clerk/nextjs/server";
 import { revalidatePath } from "next/cache";
 import { createSupabaseServerClient, createSupabaseServiceClient } from "@/lib/supabase/server";
 
@@ -31,7 +31,7 @@ export interface SubmitReportResult {
 export async function submitReportAction(
   input: SubmitReportInput
 ): Promise<SubmitReportResult> {
-  const { userId } = await auth();
+  const { userId, sessionClaims } = await auth();
   if (!userId) {
     return {
       success: false,
@@ -63,8 +63,20 @@ export async function submitReportAction(
 
   try {
     const supabase = await createSupabaseServerClient();
-    const user = await currentUser();
-    const reporterEmail = user?.emailAddresses?.[0]?.emailAddress || null;
+    const primaryEmail =
+      (sessionClaims?.email as string) ||
+      (sessionClaims?.primaryEmail as string) ||
+      null;
+
+    let reporterEmail = primaryEmail;
+    if (!reporterEmail) {
+      const { data: prof } = await supabase
+        .from("profiles")
+        .select("email")
+        .eq("clerk_user_id", userId)
+        .maybeSingle();
+      reporterEmail = prof?.email || null;
+    }
 
     if (targetType === "listing") {
       // 1. Verify listing exists and is not owned by the reporter
@@ -243,23 +255,33 @@ export async function updateReportStatusAction(
   newStatus: "under_review" | "resolved" | "dismissed" | "escalated",
   adminNotes?: string
 ) {
-  const { userId } = await auth();
+  const { userId, sessionClaims } = await auth();
   if (!userId) {
     return { error: "Authentication required.", code: "AUTH_REQUIRED" };
   }
 
   try {
     const supabase = await createSupabaseServerClient();
-    const user = await currentUser();
-    let isAdmin = user?.publicMetadata?.role === "admin";
-    if (!isAdmin) {
+    const publicMeta = sessionClaims?.publicMetadata as Record<string, unknown> | undefined;
+    const customMeta = sessionClaims?.metadata as Record<string, unknown> | undefined;
+    let isAdmin = publicMeta?.role === "admin" || customMeta?.role === "admin";
+    let adminEmail =
+      (sessionClaims?.email as string) ||
+      (sessionClaims?.primaryEmail as string) ||
+      null;
+
+    if (!isAdmin || !adminEmail) {
       const { data: profile } = await supabase
         .from("profiles")
-        .select("role")
+        .select("role, email")
         .eq("clerk_user_id", userId)
         .maybeSingle();
+
       if (profile?.role === "admin") {
         isAdmin = true;
+      }
+      if (profile?.email) {
+        adminEmail = profile.email;
       }
     }
 
@@ -301,7 +323,7 @@ export async function updateReportStatusAction(
     // Record audit log
     await serviceClient.from("admin_audit_logs").insert({
       admin_id: userId,
-      admin_email: user?.emailAddresses?.[0]?.emailAddress || "admin@rentit.ph",
+      admin_email: adminEmail || "admin@rentit.ph",
       action: `report_${newStatus}`,
       target_type: targetType === "listing" ? "listing" : "user",
       target_id: reportId,

@@ -1,11 +1,16 @@
 "use server";
 
-import { auth, currentUser } from "@clerk/nextjs/server";
+import { auth } from "@clerk/nextjs/server";
 import { revalidatePath } from "next/cache";
 import {
   createSupabaseServerClient,
   createSupabaseServiceClient,
 } from "@/lib/supabase/server";
+
+function checkAdminClaim(sessionClaims: unknown): boolean {
+  const claims = sessionClaims as { publicMetadata?: { role?: string }; metadata?: { role?: string } } | null | undefined;
+  return claims?.publicMetadata?.role === "admin" || claims?.metadata?.role === "admin";
+}
 
 export type UpdatableBookingStatus =
   | "pending"
@@ -33,7 +38,7 @@ export async function updateBookingStatusAction(
   bookingId: string,
   newStatus: UpdatableBookingStatus
 ) {
-  const { userId } = await auth();
+  const { userId, sessionClaims } = await auth();
   if (!userId) {
     return {
       error: "You must be signed in to perform this action.",
@@ -69,9 +74,8 @@ export async function updateBookingStatusAction(
     const listingOwnerId = (booking.listing as unknown as { owner_id: string } | null)?.owner_id;
     const isOwner = listingOwnerId === userId;
 
-    const user = await currentUser();
-    let isAdmin = user?.publicMetadata?.role === "admin";
-    if (!isAdmin) {
+    let isAdmin = checkAdminClaim(sessionClaims);
+    if (!isAdmin && !isRenter && !isOwner) {
       const { data: profile } = await supabase
         .from("profiles")
         .select("role")
@@ -167,7 +171,7 @@ export async function updateBookingStatusAction(
  * 4. Revalidates dashboard and marketplace routes.
  */
 export async function deleteUserListingAction(listingId: string) {
-  const { userId } = await auth();
+  const { userId, sessionClaims } = await auth();
   if (!userId) {
     return {
       error: "You must be signed in to perform this action.",
@@ -177,8 +181,7 @@ export async function deleteUserListingAction(listingId: string) {
 
   try {
     const supabase = await createSupabaseServerClient();
-    const user = await currentUser();
-    let isAdmin = user?.publicMetadata?.role === "admin";
+    let isAdmin = checkAdminClaim(sessionClaims);
     if (!isAdmin) {
       const { data: profile } = await supabase
         .from("profiles")
@@ -334,15 +337,14 @@ export async function deleteUserListingAction(listingId: string) {
  * Preserves financial, audit, and legal records while removing the listing from public marketplace and active inventory.
  */
 export async function archiveUserListingAction(listingId: string) {
-  const { userId } = await auth();
+  const { userId, sessionClaims } = await auth();
   if (!userId) {
     return { error: "You must be signed in to perform this action.", code: "AUTH_REQUIRED" };
   }
 
   try {
     const supabase = await createSupabaseServerClient();
-    const user = await currentUser();
-    let isAdmin = user?.publicMetadata?.role === "admin";
+    let isAdmin = checkAdminClaim(sessionClaims);
     if (!isAdmin) {
       const { data: profile } = await supabase
         .from("profiles")
@@ -406,7 +408,7 @@ export async function archiveUserListingAction(listingId: string) {
  * Toggles status between 'available' and 'inactive' (Not Available) with strict ownership checks.
  */
 export async function toggleListingAvailabilityAction(listingId: string) {
-  const { userId } = await auth();
+  const { userId, sessionClaims } = await auth();
   if (!userId) {
     return {
       error: "You must be signed in to perform this action.",
@@ -416,8 +418,7 @@ export async function toggleListingAvailabilityAction(listingId: string) {
 
   try {
     const supabase = await createSupabaseServerClient();
-    const user = await currentUser();
-    let isAdmin = user?.publicMetadata?.role === "admin";
+    let isAdmin = checkAdminClaim(sessionClaims);
     if (!isAdmin) {
       const { data: profile } = await supabase
         .from("profiles")

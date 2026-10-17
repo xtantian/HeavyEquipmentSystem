@@ -1,5 +1,6 @@
 import "server-only";
 
+import { unstable_cache } from "next/cache";
 import { createClient } from "@supabase/supabase-js";
 import { createSupabaseServerClient } from "./server";
 import type { Database, CategoryRow } from "./types";
@@ -16,15 +17,13 @@ function getPublicClient() {
   return createClient<Database>(url, key);
 }
 
-export async function getMarketplaceCategories(): Promise<CategoryRow[]> {
+async function fetchCategoriesFromDb(): Promise<CategoryRow[]> {
   try {
     const supabase = getPublicClient() || (await createSupabaseServerClient());
     const { data, error } = await supabase
       .from("categories")
       .select("*")
       .order("name", { ascending: true });
-
-    console.log("[select categories]", { count: data?.length, error });
 
     if (!error && data && data.length > 0) {
       return data;
@@ -46,6 +45,20 @@ export async function getMarketplaceCategories(): Promise<CategoryRow[]> {
   }));
 }
 
+const getCachedMarketplaceCategoriesInternal = unstable_cache(
+  fetchCategoriesFromDb,
+  ["marketplace-categories"],
+  { revalidate: 3600, tags: ["marketplace-categories"] }
+);
+
+export async function getMarketplaceCategories(): Promise<CategoryRow[]> {
+  try {
+    return await getCachedMarketplaceCategoriesInternal();
+  } catch {
+    return fetchCategoriesFromDb();
+  }
+}
+
 export const RESERVATION_BLOCKING_STATUSES = [
   "pending",
   "accepted",
@@ -62,27 +75,48 @@ export interface ListingsQueryOptions {
   end?: string;
   min?: string | number;
   max?: string | number;
+  page?: string | number;
+  limit?: string | number;
+}
+
+export interface MarketplaceListingsResult {
+  items: MarketplaceListingItem[];
+  totalCount: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
 }
 
 export async function getMarketplaceListings(
   options: ListingsQueryOptions = {}
-): Promise<MarketplaceListingItem[]> {
+): Promise<MarketplaceListingsResult> {
   const { category, q, start, end, min, max } = options;
+  const page = Math.max(1, Number(options.page) || 1);
+  const pageSize = Math.min(100, Math.max(1, Number(options.limit) || 24));
+  const offset = (page - 1) * pageSize;
 
   try {
     const supabase = getPublicClient() || (await createSupabaseServerClient());
 
     // 1. Identify category ID if category slug provided
+    // Optimization: Resolve category ID from cached categories instead of an unneeded extra DB round-trip
     let categoryId: string | null = null;
     if (category && category !== "all") {
-      const { data: catData } = await supabase
-        .from("categories")
-        .select("id")
-        .eq("slug", category)
-        .maybeSingle();
+      const allCategories = await getMarketplaceCategories();
+      const matchedCategory = allCategories.find((c) => c.slug === category);
+      if (matchedCategory) {
+        categoryId = matchedCategory.id;
+      } else {
+        // Fallback: direct DB query if category was newly created and cache has not revalidated
+        const { data: catData } = await supabase
+          .from("categories")
+          .select("id")
+          .eq("slug", category)
+          .maybeSingle();
 
-      if (catData) {
-        categoryId = catData.id;
+        if (catData) {
+          categoryId = catData.id;
+        }
       }
     }
 
@@ -108,14 +142,17 @@ export async function getMarketplaceListings(
       }
     }
 
-    // 3. Query listings with relations (including available and newly submitted pending_review)
+    // 3. Query listings with relations and exact server-side count
     let query = supabase
       .from("listings")
-      .select(`
+      .select(
+        `
         *,
         category:categories(*),
         listing_images(*)
-      `)
+      `,
+        { count: "exact" }
+      )
       .in("status", ["available", "pending_review"]);
 
     if (categoryId) {
@@ -145,12 +182,15 @@ export async function getMarketplaceListings(
       query = query.not("id", "in", `(${bookedListingIds.join(",")})`);
     }
 
-    const { data, error } = await query.order("created_at", { ascending: false });
-
-    console.log("[select listings]", { count: data?.length, error });
+    const { data, count, error } = await query
+      .order("created_at", { ascending: false })
+      .range(offset, offset + pageSize - 1);
 
     if (!error && data) {
+      const totalCount = count !== null && count !== undefined ? count : data.length;
+      const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
       let results = data as unknown as MarketplaceListingItem[];
+
       if (results.length > 0) {
         const listingIds = results.map((l) => l.id);
         const { data: activeBookings } = await supabase
@@ -169,11 +209,19 @@ export async function getMarketplaceListings(
       }
 
       // Security: Strip sensitive asset_identifier (VIN, serial number) from public marketplace listing items
-      return results.map((item) => {
+      const safeItems = results.map((item) => {
         const safeItem = { ...item };
         delete (safeItem as Record<string, unknown>).asset_identifier;
         return safeItem as MarketplaceListingItem;
       });
+
+      return {
+        items: safeItems,
+        totalCount,
+        page,
+        pageSize,
+        totalPages,
+      };
     }
   } catch (err) {
     console.error("[supabase/marketplace] Error fetching listings:", err);
@@ -237,7 +285,7 @@ export async function getMarketplaceListingById(
   return fallback || null;
 }
 
-function filterMockListings(options: ListingsQueryOptions): MarketplaceListingItem[] {
+function filterMockListings(options: ListingsQueryOptions): MarketplaceListingsResult {
   let results = [...MOCK_LISTINGS];
 
   if (options.category && options.category !== "all") {
@@ -268,7 +316,20 @@ function filterMockListings(options: ListingsQueryOptions): MarketplaceListingIt
     }
   }
 
-  return results;
+  const totalCount = results.length;
+  const page = Math.max(1, Number(options.page) || 1);
+  const pageSize = Math.min(100, Math.max(1, Number(options.limit) || 24));
+  const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
+  const offset = (page - 1) * pageSize;
+  const items = results.slice(offset, offset + pageSize);
+
+  return {
+    items,
+    totalCount,
+    page,
+    pageSize,
+    totalPages,
+  };
 }
 
 export interface ListingBookedRange {

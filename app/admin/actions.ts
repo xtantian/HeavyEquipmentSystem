@@ -1,6 +1,6 @@
 "use server";
 
-import { auth, currentUser, clerkClient } from "@clerk/nextjs/server";
+import { auth, clerkClient } from "@clerk/nextjs/server";
 import { revalidatePath } from "next/cache";
 import { createSupabaseServiceClient, createSupabaseServerClient } from "@/lib/supabase/server";
 import type { ListingStatus, UserAccountStatus, Json } from "@/lib/supabase/types";
@@ -22,19 +22,16 @@ async function getAdminActionClient() {
  * Checks both Clerk publicMetadata and Supabase profiles table, and enforces active account status.
  */
 async function verifyAdminCaller() {
-  const { userId } = await auth();
+  const { userId, sessionClaims } = await auth();
   if (!userId) {
     throw new Error("Unauthorized: Authentication required");
   }
-
-  const user = await currentUser();
-  const primaryEmail = user?.primaryEmailAddress?.emailAddress || null;
 
   // Use authenticated server client to inspect profile within caller's own permissions
   const supabase = await createSupabaseServerClient();
   const { data: profile, error } = await supabase
     .from("profiles")
-    .select("role, status")
+    .select("email, role, status")
     .eq("clerk_user_id", userId)
     .maybeSingle();
 
@@ -47,12 +44,19 @@ async function verifyAdminCaller() {
     throw new Error(`Unauthorized: Administrator account is ${profile.status}`);
   }
 
-  const isAdminInClerk = user?.publicMetadata?.role === "admin";
+  const publicMeta = sessionClaims?.publicMetadata as Record<string, unknown> | undefined;
+  const customMeta = sessionClaims?.metadata as Record<string, unknown> | undefined;
+  const isAdminInClerk = publicMeta?.role === "admin" || customMeta?.role === "admin";
   const isAdminInProfile = profile?.role === "admin";
 
   if (!isAdminInClerk && !isAdminInProfile) {
     throw new Error("Unauthorized: Administrator privileges required");
   }
+
+  const primaryEmail =
+    profile?.email ||
+    (sessionClaims?.email as string) ||
+    null;
 
   return {
     adminId: userId,
