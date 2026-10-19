@@ -1,0 +1,373 @@
+"use server";
+
+import { auth } from "@clerk/nextjs/server";
+import { revalidatePath } from "next/cache";
+import { createSupabaseServerClient, createSupabaseServiceClient } from "@/lib/supabase/server";
+
+export interface SubmitReportInput {
+  targetType: "listing" | "profile";
+  targetId: string;
+  reason: string;
+  details?: string;
+}
+
+export interface SubmitReportResult {
+  success: boolean;
+  reportId?: string;
+  error?: string;
+  code?: "AUTH_REQUIRED" | "SELF_REPORT" | "INVALID_INPUT" | "DUPLICATE_REPORT" | "NOT_FOUND" | "ERROR";
+}
+
+/**
+ * Authoritative Server Action to submit a report against a listing or user profile.
+ *
+ * Enforces:
+ * 1. Strict Clerk authentication
+ * 2. Self-report prevention (users cannot report own listing or profile)
+ * 3. Input validation & sanitization
+ * 4. Deduplication: prevents spamming multiple open reports for the same target
+ * 5. Persistent database insertion with fallback compatibility
+ */
+export async function submitReportAction(
+  input: SubmitReportInput
+): Promise<SubmitReportResult> {
+  const { userId, sessionClaims } = await auth();
+  if (!userId) {
+    return {
+      success: false,
+      error: "You must be signed in to submit a platform report.",
+      code: "AUTH_REQUIRED",
+    };
+  }
+
+  const { targetType, targetId, reason, details } = input;
+
+  const trimmedReason = reason?.trim();
+  const trimmedDetails = details?.trim() || null;
+
+  if (!trimmedReason || trimmedReason.length < 3) {
+    return {
+      success: false,
+      error: "Please select or provide a valid reason for the report.",
+      code: "INVALID_INPUT",
+    };
+  }
+
+  if (trimmedDetails && trimmedDetails.length > 1000) {
+    return {
+      success: false,
+      error: "Report details must not exceed 1,000 characters.",
+      code: "INVALID_INPUT",
+    };
+  }
+
+  try {
+    const supabase = await createSupabaseServerClient();
+    const primaryEmail =
+      (sessionClaims?.email as string) ||
+      (sessionClaims?.primaryEmail as string) ||
+      null;
+
+    let reporterEmail = primaryEmail;
+    if (!reporterEmail) {
+      const { data: prof } = await supabase
+        .from("profiles")
+        .select("email")
+        .eq("clerk_user_id", userId)
+        .maybeSingle();
+      reporterEmail = prof?.email || null;
+    }
+
+    // Resolve report writer client: prefer service client to ensure single-transaction execution and guaranteed id return
+    let reportDbClient;
+    try {
+      reportDbClient = createSupabaseServiceClient();
+    } catch {
+      reportDbClient = supabase;
+    }
+
+    if (targetType === "listing") {
+      // 1. Verify listing exists and is not owned by the reporter
+      const { data: listing, error: listingErr } = await supabase
+        .from("listings")
+        .select("id, owner_id, title")
+        .eq("id", targetId)
+        .maybeSingle();
+
+      if (listingErr || !listing) {
+        return {
+          success: false,
+          error: "The listing you are attempting to report was not found.",
+          code: "NOT_FOUND",
+        };
+      }
+
+      if (listing.owner_id === userId) {
+        return {
+          success: false,
+          error: "You cannot report your own equipment listing.",
+          code: "SELF_REPORT",
+        };
+      }
+
+      // 2. Prevent duplicate pending reports from the same reporter
+      const { data: existingReport } = await reportDbClient
+        .from("listing_reports")
+        .select("id, status")
+        .eq("listing_id", targetId)
+        .eq("reporter_id", userId)
+        .in("status", ["pending", "reviewed"])
+        .maybeSingle();
+
+      if (existingReport) {
+        return {
+          success: false,
+          error: "You have already submitted an active report for this listing. Our moderation team is reviewing it.",
+          code: "DUPLICATE_REPORT",
+        };
+      }
+
+      // 3. Persist listing report (exactly ONE single insert)
+      const { data: inserted, error: insertErr } = await reportDbClient
+        .from("listing_reports")
+        .insert({
+          listing_id: targetId,
+          reporter_id: userId,
+          reporter_email: reporterEmail,
+          reason: trimmedReason,
+          details: trimmedDetails,
+          status: "pending",
+        })
+        .select("id")
+        .maybeSingle();
+
+      if (insertErr) {
+        // Concurrency handling: catch PostgreSQL unique violation 23505
+        if (
+          insertErr.code === "23505" ||
+          insertErr.message?.includes("duplicate key") ||
+          insertErr.message?.includes("unique")
+        ) {
+          return {
+            success: false,
+            error: "You have already submitted an active report for this listing. Our moderation team is reviewing it.",
+            code: "DUPLICATE_REPORT",
+          };
+        }
+
+        console.error("[submitReportAction] Listing report insert error:", insertErr.message);
+        return {
+          success: false,
+          error: "Failed to save listing report. Please try again.",
+          code: "ERROR",
+        };
+      }
+
+      if (!inserted?.id) {
+        return {
+          success: false,
+          error: "Report creation could not be confirmed.",
+          code: "ERROR",
+        };
+      }
+
+      return {
+        success: true,
+        reportId: inserted.id,
+      };
+    } else {
+      // Target is a user profile
+      if (targetId === userId) {
+        return {
+          success: false,
+          error: "You cannot report your own account profile.",
+          code: "SELF_REPORT",
+        };
+      }
+
+      // Check if profile exists
+      const { data: targetProfile } = await supabase
+        .from("profiles")
+        .select("id, clerk_user_id")
+        .eq("clerk_user_id", targetId)
+        .maybeSingle();
+
+      if (!targetProfile) {
+        return {
+          success: false,
+          error: "The user profile you are attempting to report was not found.",
+          code: "NOT_FOUND",
+        };
+      }
+
+      // 2. Prevent duplicate active reports from the same reporter
+      const { data: existingProfileRep } = await reportDbClient
+        .from("profile_reports")
+        .select("id, status")
+        .eq("target_user_id", targetId)
+        .eq("reporter_id", userId)
+        .in("status", ["pending", "under_review"])
+        .maybeSingle();
+
+      if (existingProfileRep) {
+        return {
+          success: false,
+          error: "You have already submitted an active report for this user profile. Our moderation team is reviewing it.",
+          code: "DUPLICATE_REPORT",
+        };
+      }
+
+      // 3. Persist profile report (exactly ONE single insert)
+      const { data: profileReport, error: prErr } = await reportDbClient
+        .from("profile_reports")
+        .insert({
+          target_user_id: targetId,
+          reporter_id: userId,
+          reporter_email: reporterEmail,
+          reason: trimmedReason,
+          details: trimmedDetails,
+          status: "pending",
+        })
+        .select("id")
+        .maybeSingle();
+
+      if (prErr) {
+        // Concurrency handling: catch PostgreSQL unique violation 23505
+        if (
+          prErr.code === "23505" ||
+          prErr.message?.includes("duplicate key") ||
+          prErr.message?.includes("unique")
+        ) {
+          return {
+            success: false,
+            error: "You have already submitted an active report for this user profile. Our moderation team is reviewing it.",
+            code: "DUPLICATE_REPORT",
+          };
+        }
+
+        console.error("[submitReportAction] Profile report insert error:", prErr.message);
+        return {
+          success: false,
+          error: "Failed to save profile report. Please try again.",
+          code: "ERROR",
+        };
+      }
+
+      if (!profileReport?.id) {
+        return {
+          success: false,
+          error: "Profile report creation could not be confirmed.",
+          code: "ERROR",
+        };
+      }
+
+      return {
+        success: true,
+        reportId: profileReport.id,
+      };
+    }
+  } catch (err: unknown) {
+    console.error("[submitReportAction] Server error:", err);
+    return {
+      success: false,
+      error: "An unexpected error occurred while submitting your report.",
+      code: "ERROR",
+    };
+  }
+}
+
+/**
+ * Authoritative Server Action for administrators to update report lifecycle status.
+ * Supports statuses: 'under_review', 'resolved', 'dismissed', 'escalated'.
+ */
+export async function updateReportStatusAction(
+  reportId: string,
+  targetType: "listing" | "profile",
+  newStatus: "under_review" | "resolved" | "dismissed" | "escalated",
+  adminNotes?: string
+) {
+  const { userId, sessionClaims } = await auth();
+  if (!userId) {
+    return { error: "Authentication required.", code: "AUTH_REQUIRED" };
+  }
+
+  try {
+    const supabase = await createSupabaseServerClient();
+    const publicMeta = sessionClaims?.publicMetadata as Record<string, unknown> | undefined;
+    const customMeta = sessionClaims?.metadata as Record<string, unknown> | undefined;
+    let isAdmin = publicMeta?.role === "admin" || customMeta?.role === "admin";
+    let adminEmail =
+      (sessionClaims?.email as string) ||
+      (sessionClaims?.primaryEmail as string) ||
+      null;
+
+    if (!isAdmin || !adminEmail) {
+      const { data: profile } = await supabase
+        .from("profiles")
+        .select("role, email")
+        .eq("clerk_user_id", userId)
+        .maybeSingle();
+
+      if (profile?.role === "admin") {
+        isAdmin = true;
+      }
+      if (profile?.email) {
+        adminEmail = profile.email;
+      }
+    }
+
+    if (!isAdmin) {
+      return { error: "Unauthorized: Administrator access required.", code: "UNAUTHORIZED" };
+    }
+
+    const serviceClient = createSupabaseServiceClient();
+
+    if (targetType === "listing") {
+      // Map newStatus to listing_reports status column
+      const dbStatus = newStatus === "resolved" ? "action_taken" : newStatus === "under_review" ? "reviewed" : newStatus;
+
+      const { error } = await serviceClient
+        .from("listing_reports")
+        .update({
+          status: dbStatus as unknown as "pending",
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", reportId);
+
+      if (error) {
+        return { error: error.message };
+      }
+    } else {
+      try {
+        await serviceClient
+          .from("profile_reports")
+          .update({
+            status: newStatus as "pending" | "under_review" | "resolved" | "dismissed" | "escalated",
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", reportId);
+      } catch (err) {
+        console.warn("[updateReportStatusAction] profile_reports update warning:", err);
+      }
+    }
+
+    // Record audit log
+    await serviceClient.from("admin_audit_logs").insert({
+      admin_id: userId,
+      admin_email: adminEmail || "admin@rentit.ph",
+      action: `report_${newStatus}`,
+      target_type: targetType === "listing" ? "listing" : "user",
+      target_id: reportId,
+      details: {
+        admin_notes: adminNotes || null,
+        new_status: newStatus,
+        updated_at: new Date().toISOString(),
+      },
+    });
+
+    revalidatePath("/admin/reports");
+    return { success: true };
+  } catch (err: unknown) {
+    return { error: (err as Error).message || "Failed to update report status." };
+  }
+}

@@ -1,9 +1,10 @@
 import * as React from "react";
-import { currentUser } from "@clerk/nextjs/server";
+import { auth } from "@clerk/nextjs/server";
 import { redirect } from "next/navigation";
 import { Navbar } from "@/components/landing/navbar";
 import { Footer } from "@/components/landing/footer";
 import { AdminNav } from "@/components/admin/admin-nav";
+import { AdminAccessDenied } from "@/components/admin/admin-access-denied";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
 export const dynamic = "force-dynamic";
@@ -18,22 +19,26 @@ export default async function AdminLayout({
 }: {
   children: React.ReactNode;
 }) {
-  // 1. Strict Server-Side Role-Based Access Control (RBAC)
-  const user = await currentUser();
-  if (!user) {
+  // 1. Strict Server-Side Role-Based Access Control (RBAC) via fast local JWT claims
+  const { userId, sessionClaims } = await auth();
+  if (!userId) {
     redirect("/sign-in?redirect_url=/admin");
   }
 
-  let isAdmin = user.publicMetadata?.role === "admin";
+  // Pre-create Supabase server client once for both role verification and badge count
+  const supabase = await createSupabaseServerClient();
+
+  const publicMeta = sessionClaims?.publicMetadata as Record<string, unknown> | undefined;
+  const customMeta = sessionClaims?.metadata as Record<string, unknown> | undefined;
+  let isAdmin = publicMeta?.role === "admin" || customMeta?.role === "admin";
 
   if (!isAdmin) {
     // Check Supabase profiles role as mirror fallback
     try {
-      const supabase = await createSupabaseServerClient();
       const { data: profile } = await supabase
         .from("profiles")
         .select("role")
-        .eq("clerk_user_id", user.id)
+        .eq("clerk_user_id", userId)
         .maybeSingle();
 
       if (profile?.role === "admin") {
@@ -44,15 +49,29 @@ export default async function AdminLayout({
     }
   }
 
-  // Reject non-admin access immediately at server level
+  // Reject non-admin access cleanly with informative feedback rather than silent bounce
   if (!isAdmin) {
-    redirect("/");
+    const userEmail =
+      (sessionClaims?.email as string) ||
+      (sessionClaims?.primaryEmail as string) ||
+      null;
+
+    return (
+      <div className="flex min-h-screen flex-col bg-background font-sans text-foreground">
+        <Navbar />
+        <main className="flex-1 bg-muted/20 py-8 sm:py-10">
+          <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
+            <AdminAccessDenied userEmail={userEmail} userId={userId} />
+          </div>
+        </main>
+        <Footer />
+      </div>
+    );
   }
 
-  // 2. Fetch active reports count for navigation badge
+  // 2. Fetch active reports count for navigation badge using the existing client
   let pendingReportsCount = 0;
   try {
-    const supabase = await createSupabaseServerClient();
     const { count } = await supabase
       .from("listing_reports")
       .select("*", { count: "exact", head: true })

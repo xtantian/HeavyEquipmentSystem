@@ -979,14 +979,21 @@ function simulateClerkWebhookUserCreated({
   clerkPublicMetadata = {},
   clientSuppliedRole = null,
   pendingInvitations = [],
+  dbTrackingError = false,
 }) {
-  const isInvitedViaMetadata = clerkPublicMetadata.role === "admin" || clerkPublicMetadata.invitedAsAdmin === true;
+  if (dbTrackingError) {
+    return { error: "Database error tracking invitation", assignedRole: "customer" };
+  }
+
+  // Security Priority: Never trust clientSuppliedRole or clerkPublicMetadata alone.
+  // ONLY grant admin role if there is a verified, pending invitation in admin_invitations.
+  const normalizedEmail = (email || "").trim().toLowerCase();
   const matchingInvitation = pendingInvitations.find(
-    (inv) => inv.email.toLowerCase() === email.toLowerCase() && inv.status === "pending"
+    (inv) => inv.email.toLowerCase() === normalizedEmail && inv.status === "pending"
   );
 
   let finalAssignedRole = "customer";
-  if (isInvitedViaMetadata || matchingInvitation) {
+  if (matchingInvitation) {
     finalAssignedRole = "admin";
   }
 
@@ -1038,6 +1045,1610 @@ assert(
   "User signing up after invitation revocation remains customer"
 );
 
+// Case 4: Security priority - user attempting admin escalation via public_metadata without DB invitation
+const unverifiedEscalation = simulateClerkWebhookUserCreated({
+  userId: "user_attacker",
+  email: "attacker@gmail.com",
+  clerkPublicMetadata: { invitedAsAdmin: true, role: "admin" },
+  pendingInvitations: [], // No server invitation exists!
+});
+assert(
+  unverifiedEscalation.assignedRole === "customer",
+  "Unauthorized metadata escalation without pending server invitation is REJECTED"
+);
+
+// -----------------------------------------------------------------------------
+// 13. LISTING BOOKING DIAGNOSTIC OUTCOME DIFFERENTIATION & CORRELATION LOGGING
+// [SIMULATION - OFFLINE UNIT TESTS - NOT LIVE SUPABASE INTEGRATION]
+// -----------------------------------------------------------------------------
+console.log("\n▶ SUITE 13: Listing Booking Diagnostic Outcome Differentiation & Correlation Logging (Simulation)");
+
+function simulateCreateBookingAction({
+  userId,
+  userProfile = { status: "active" },
+  profileQueryError = null,
+  listingId,
+  mockDbListing = null,
+  dbQueryError = null,
+  overlappingBookings = [],
+  overlapQueryError = null,
+  dbInsertError = null,
+  startDate = "2026-11-01",
+  endDate = "2026-11-03",
+}) {
+  const correlationId = "corr-" + Math.random().toString(36).substring(2, 9);
+  const diagnosticLogs = [];
+  let insertAttempted = false;
+
+  // 1. Auth check
+  if (!userId) {
+    return { error: "You must be signed in to request a booking.", code: "AUTH_REQUIRED", correlationId, insertAttempted, logs: diagnosticLogs };
+  }
+
+  // 2. Separate mock/demo listings from real UUID database listings
+  const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const isMockListing = listingId.startsWith("lst-") || listingId.startsWith("mock-");
+
+  if (isMockListing) {
+    diagnosticLogs.push({ correlationId, listingId, code: "DEMO_LISTING" });
+    return {
+      error: "This is a demonstration listing and cannot accept rental bookings. Please select an active marketplace listing.",
+      code: "DEMO_LISTING",
+      correlationId,
+      insertAttempted,
+      logs: diagnosticLogs,
+    };
+  }
+
+  if (!UUID_REGEX.test(listingId)) {
+    diagnosticLogs.push({ correlationId, listingId, code: "INVALID_ID" });
+    return {
+      error: "The requested equipment listing identifier is invalid.",
+      code: "INVALID_ID",
+      correlationId,
+      insertAttempted,
+      logs: diagnosticLogs,
+    };
+  }
+
+  // 3. Profile check (fail-closed on query error or missing profile)
+  if (profileQueryError) {
+    diagnosticLogs.push({ correlationId, listingId, code: profileQueryError.code, errorDetails: profileQueryError.message });
+    return {
+      error: "A database error occurred while verifying your account. Please try again later.",
+      code: "DB_ERROR",
+      correlationId,
+      insertAttempted,
+      logs: diagnosticLogs,
+    };
+  }
+
+  if (!userProfile) {
+    diagnosticLogs.push({ correlationId, listingId, code: "PROFILE_NOT_FOUND", userId });
+    return {
+      error: "Your user profile could not be found or verified. Please try again later.",
+      code: "DB_ERROR",
+      correlationId,
+      insertAttempted,
+      logs: diagnosticLogs,
+    };
+  }
+
+  if (userProfile.status === "restricted") {
+    diagnosticLogs.push({ correlationId, listingId, status: userProfile.status });
+    return { error: "Your account is currently restricted from submitting rental requests.", code: "ERROR", correlationId, insertAttempted, logs: diagnosticLogs };
+  }
+  if (userProfile.status === "banned" || userProfile.status === "deleted") {
+    diagnosticLogs.push({ correlationId, listingId, status: userProfile.status });
+    return { error: "Your account is suspended and cannot initiate rental bookings.", code: "ERROR", correlationId, insertAttempted, logs: diagnosticLogs };
+  }
+
+  // 4. Database query outcome differentiation
+  if (dbQueryError) {
+    diagnosticLogs.push({ correlationId, listingId, code: dbQueryError.code, errorDetails: dbQueryError.message });
+    if (dbQueryError.code === "42501") {
+      return { error: "You do not have permission to view or book this listing.", code: "PERMISSION_DENIED", correlationId, insertAttempted, logs: diagnosticLogs };
+    }
+    return { error: "A database error occurred while retrieving the listing. Please try again later.", code: "DB_ERROR", correlationId, insertAttempted, logs: diagnosticLogs };
+  }
+
+  if (!mockDbListing) {
+    diagnosticLogs.push({ correlationId, listingId, code: "NOT_FOUND" });
+    return { error: "The requested equipment listing was not found.", code: "NOT_FOUND", correlationId, insertAttempted, logs: diagnosticLogs };
+  }
+
+  // 5. Status check
+  if (mockDbListing.status !== "available") {
+    diagnosticLogs.push({ correlationId, listingId, status: mockDbListing.status });
+    let safeStatusMessage;
+    if (mockDbListing.status === "archived") {
+      safeStatusMessage = "This equipment listing has been archived and is no longer available for booking.";
+    } else if (mockDbListing.status === "restricted") {
+      safeStatusMessage = "This equipment listing is restricted and cannot be booked.";
+    } else if (mockDbListing.status === "deleted") {
+      safeStatusMessage = "This equipment listing has been removed and is no longer available.";
+    } else if (mockDbListing.status === "maintenance") {
+      safeStatusMessage = "This equipment is currently undergoing maintenance and cannot be booked.";
+    } else if (mockDbListing.status === "inactive") {
+      safeStatusMessage = "This equipment listing is currently inactive and cannot be booked.";
+    } else {
+      safeStatusMessage = `This equipment is currently ${mockDbListing.status} and cannot be booked.`;
+    }
+    return { error: safeStatusMessage, code: "UNAVAILABLE", correlationId, insertAttempted, logs: diagnosticLogs };
+  }
+
+  // 6. Prevent booking own listing
+  if (mockDbListing.owner_id && mockDbListing.owner_id === userId) {
+    diagnosticLogs.push({ correlationId, listingId, code: "OWN_LISTING" });
+    return { error: "You cannot book your own listing.", code: "OWN_LISTING", correlationId, insertAttempted, logs: diagnosticLogs };
+  }
+
+  // 7. Overlap check query failure & detection
+  if (overlapQueryError) {
+    diagnosticLogs.push({ correlationId, listingId, code: overlapQueryError.code, errorDetails: overlapQueryError.message });
+    return {
+      error: "A database error occurred while verifying reservation availability. Please try again later.",
+      code: "DB_ERROR",
+      correlationId,
+      insertAttempted,
+      logs: diagnosticLogs,
+    };
+  }
+
+  if (overlappingBookings.length > 0) {
+    diagnosticLogs.push({ correlationId, listingId, code: "OVERLAP" });
+    return { error: "These dates conflict with an existing reservation. Please select different dates.", code: "OVERLAP", correlationId, insertAttempted, logs: diagnosticLogs };
+  }
+
+  // 8. DB insert attempt
+  insertAttempted = true;
+  if (dbInsertError) {
+    if (dbInsertError.code === "23P01") {
+      return { error: "These dates conflict with an existing reservation. Please select different dates.", code: "OVERLAP", correlationId, insertAttempted, logs: diagnosticLogs };
+    }
+    return { error: "Unable to submit your booking right now. Please try again.", code: "ERROR", correlationId, insertAttempted, logs: diagnosticLogs };
+  }
+
+  return { success: true, bookingId: "bk-new-123", serverTotalPrice: 15000, correlationId, insertAttempted, logs: diagnosticLogs };
+}
+
+// Test 13.1: Authorized user booking existing available listing
+const validBookingRes = simulateCreateBookingAction({
+  userId: "user_renter_1",
+  listingId: "12c46209-85b4-4bb5-860a-54325662edc9",
+  mockDbListing: { id: "12c46209-85b4-4bb5-860a-54325662edc9", owner_id: "user_owner_1", status: "available", price_per_day: 5000 },
+});
+assert(validBookingRes.success && validBookingRes.bookingId, "[Simulation] Authorized booking succeeds");
+assert(validBookingRes.insertAttempted === true, "[Simulation] Authorized booking attempts database insertion");
+
+// Test 13.2: Missing listing ID produces distinguishable diagnostic outcome
+const missingListingRes = simulateCreateBookingAction({
+  userId: "user_renter_1",
+  listingId: "00000000-0000-0000-0000-000000000000",
+  mockDbListing: null,
+});
+assert(missingListingRes.code === "NOT_FOUND", "[Simulation] Missing listing returns distinct 'NOT_FOUND' code");
+assert(missingListingRes.error === "The requested equipment listing was not found.", "[Simulation] Missing listing returns distinct 'not found' message without collapsing into vague error");
+assert(missingListingRes.insertAttempted === false, "[Simulation] Missing listing does NOT attempt booking insertion");
+assert(missingListingRes.logs.length > 0 && missingListingRes.logs[0].correlationId, "[Simulation] Missing listing records structured server-side diagnostic log with correlation ID");
+
+// Test 13.3: RLS denial produces distinct permission error
+const rlsDeniedRes = simulateCreateBookingAction({
+  userId: "user_renter_1",
+  listingId: "e0000000-0000-0000-0000-000000000001",
+  dbQueryError: { code: "42501", message: "permission denied for table listings" },
+});
+assert(rlsDeniedRes.code === "PERMISSION_DENIED", "[Simulation] RLS-denied query produces distinct PERMISSION_DENIED code");
+assert(rlsDeniedRes.error === "You do not have permission to view or book this listing.", "[Simulation] RLS-denied query produces distinct user-safe permission error");
+assert(rlsDeniedRes.insertAttempted === false, "[Simulation] RLS denial does NOT attempt booking insertion");
+assert(rlsDeniedRes.logs[0].code === "42501", "[Simulation] RLS-denied query logs Postgres 42501 error code with correlation ID");
+
+// Test 13.4: Demo listing returns distinct DEMO_LISTING code without querying database
+const demoListingRes = simulateCreateBookingAction({
+  userId: "user_renter_1",
+  listingId: "lst-cat-320d-01",
+});
+assert(demoListingRes.code === "DEMO_LISTING", "[Simulation] Mock/demo listing returns distinct DEMO_LISTING code");
+assert(demoListingRes.error.includes("demonstration listing"), "[Simulation] Demo listing returns clear guidance message");
+assert(demoListingRes.insertAttempted === false, "[Simulation] Demo listing does NOT attempt booking insertion");
+
+// Test 13.5: Invalid format returns INVALID_ID code
+const invalidIdRes = simulateCreateBookingAction({
+  userId: "user_renter_1",
+  listingId: "not-a-valid-uuid-or-mock",
+});
+assert(invalidIdRes.code === "INVALID_ID", "[Simulation] Invalid non-UUID identifier returns distinct INVALID_ID code");
+assert(invalidIdRes.insertAttempted === false, "[Simulation] Invalid ID does NOT attempt booking insertion");
+
+// Test 13.6: Database query error returns DB_ERROR code
+const dbErrRes = simulateCreateBookingAction({
+  userId: "user_renter_1",
+  listingId: "e0000000-0000-0000-0000-000000000002",
+  dbQueryError: { code: "08006", message: "connection failure" },
+});
+assert(dbErrRes.code === "DB_ERROR", "[Simulation] General database error returns distinct DB_ERROR code");
+assert(dbErrRes.insertAttempted === false, "[Simulation] Listing query failure does NOT attempt booking insertion");
+
+// Test 13.7: Profile query error (fail-closed) returns DB_ERROR and blocks insert
+const profileErrRes = simulateCreateBookingAction({
+  userId: "user_renter_1",
+  listingId: "12c46209-85b4-4bb5-860a-54325662edc9",
+  profileQueryError: { code: "50000", message: "profiles table connection failed" },
+  mockDbListing: { id: "12c46209-85b4-4bb5-860a-54325662edc9", owner_id: "user_owner_1", status: "available", price_per_day: 5000 },
+});
+assert(profileErrRes.code === "DB_ERROR", "[Simulation] Profile query failure returns DB_ERROR");
+assert(profileErrRes.insertAttempted === false, "[Simulation] Profile query failure does NOT attempt booking insertion");
+assert(profileErrRes.logs[0].code === "50000", "[Simulation] Profile query failure logs error code with correlation ID");
+
+// Test 13.8: Missing profile (userProfile == null) fail-closed returns DB_ERROR and blocks insert
+const missingProfileRes = simulateCreateBookingAction({
+  userId: "user_renter_1",
+  userProfile: null,
+  listingId: "12c46209-85b4-4bb5-860a-54325662edc9",
+  mockDbListing: { id: "12c46209-85b4-4bb5-860a-54325662edc9", owner_id: "user_owner_1", status: "available", price_per_day: 5000 },
+});
+assert(missingProfileRes.code === "DB_ERROR", "[Simulation] Missing profile returns DB_ERROR");
+assert(missingProfileRes.insertAttempted === false, "[Simulation] Missing profile does NOT attempt booking insertion");
+assert(missingProfileRes.error.includes("could not be found or verified"), "[Simulation] Missing profile returns user-safe verification message");
+
+// Test 13.9: Overlap query failure returns DB_ERROR and blocks insert before insertion
+const overlapQueryErrRes = simulateCreateBookingAction({
+  userId: "user_renter_1",
+  listingId: "12c46209-85b4-4bb5-860a-54325662edc9",
+  mockDbListing: { id: "12c46209-85b4-4bb5-860a-54325662edc9", owner_id: "user_owner_1", status: "available", price_per_day: 5000 },
+  overlapQueryError: { code: "08006", message: "bookings availability query timeout" },
+});
+assert(overlapQueryErrRes.code === "DB_ERROR", "[Simulation] Overlap query failure returns DB_ERROR");
+assert(overlapQueryErrRes.insertAttempted === false, "[Simulation] Overlap query failure does NOT attempt booking insertion");
+assert(overlapQueryErrRes.logs[0].code === "08006", "[Simulation] Overlap query failure logs database error code with correlation ID");
+
+// Test 13.10: Specific unavailable messages (archived, maintenance, restricted, deleted, inactive)
+const archivedRes = simulateCreateBookingAction({
+  userId: "user_renter_1",
+  listingId: "a0000000-0000-0000-0000-000000000001",
+  mockDbListing: { id: "a0000000-0000-0000-0000-000000000001", owner_id: "owner-1", status: "archived", price_per_day: 1000 },
+});
+assert(archivedRes.error.includes("archived"), "[Simulation] Archived listing returns specific archival error message");
+assert(archivedRes.code === "UNAVAILABLE", "[Simulation] Archived listing returns UNAVAILABLE code");
+assert(archivedRes.insertAttempted === false, "[Simulation] Archived listing does NOT attempt booking insertion");
+
+const maintRes = simulateCreateBookingAction({
+  userId: "user_renter_1",
+  listingId: "a0000000-0000-0000-0000-000000000002",
+  mockDbListing: { id: "a0000000-0000-0000-0000-000000000002", owner_id: "owner-1", status: "maintenance", price_per_day: 1000 },
+});
+assert(maintRes.error.includes("maintenance"), "[Simulation] Maintenance listing returns specific maintenance error message");
+assert(maintRes.insertAttempted === false, "[Simulation] Maintenance listing does NOT attempt booking insertion");
+
+// Test 13.11: Owner cannot book own listing
+const ownListingRes = simulateCreateBookingAction({
+  userId: "user_owner_1",
+  listingId: "a0000000-0000-0000-0000-000000000003",
+  mockDbListing: { id: "a0000000-0000-0000-0000-000000000003", owner_id: "user_owner_1", status: "available", price_per_day: 1000 },
+});
+assert(ownListingRes.code === "OWN_LISTING", "[Simulation] Listing owned by caller is rejected with OWN_LISTING code");
+assert(ownListingRes.insertAttempted === false, "[Simulation] Own listing does NOT attempt booking insertion");
+
+// Test 13.12: Booking date overlap detected
+const overlapRes = simulateCreateBookingAction({
+  userId: "user_renter_1",
+  listingId: "a0000000-0000-0000-0000-000000000004",
+  mockDbListing: { id: "a0000000-0000-0000-0000-000000000004", owner_id: "owner-1", status: "available", price_per_day: 1000 },
+  overlappingBookings: [{ id: "bk-conflict" }],
+});
+assert(overlapRes.code === "OVERLAP", "[Simulation] Date range conflict is detected and returns OVERLAP code");
+assert(overlapRes.insertAttempted === false, "[Simulation] Date conflict does NOT attempt booking insertion");
+
+// -----------------------------------------------------------------------------
+// 14. SAVED LISTINGS SCHEMA AVAILABILITY & RESILIENCE
+// -----------------------------------------------------------------------------
+console.log("\n▶ SUITE 14: Saved Listings Schema Availability & Resilience");
+
+function simulateToggleSaveListing({
+  userId,
+  listingId,
+  tableExists = true,
+  isAlreadySaved = false,
+  triggerRaceConflict = false,
+}) {
+  if (!userId) {
+    return { success: false, saved: false, error: "You must be signed in to save listings.", code: "AUTH_REQUIRED" };
+  }
+
+  // Simulate missing table schema (PGRST205)
+  if (!tableExists) {
+    return {
+      success: false,
+      saved: false,
+      error: "The saved listings feature is currently unavailable (database schema not applied). Please try again later.",
+      code: "ERROR",
+      schemaUnavailable: true,
+    };
+  }
+
+  if (isAlreadySaved) {
+    // Unsave
+    return { success: true, saved: false };
+  } else {
+    // Save (insert)
+    if (triggerRaceConflict) {
+      // 23505 unique collision handled idempotently
+      return { success: true, saved: true };
+    }
+    return { success: true, saved: true };
+  }
+}
+
+// Test 14.1: Toggle save succeeds when schema is available
+const saveSuccess = simulateToggleSaveListing({
+  userId: "user_1",
+  listingId: "12c46209-85b4-4bb5-860a-54325662edc9",
+  tableExists: true,
+  isAlreadySaved: false,
+});
+assert(saveSuccess.success && saveSuccess.saved === true, "Saved-listing toggle succeeds when schema is available");
+
+// Test 14.2: Toggle unsave succeeds when already saved
+const unsaveSuccess = simulateToggleSaveListing({
+  userId: "user_1",
+  listingId: "12c46209-85b4-4bb5-860a-54325662edc9",
+  tableExists: true,
+  isAlreadySaved: true,
+});
+assert(unsaveSuccess.success && unsaveSuccess.saved === false, "Saved-listing toggle successfully removes saved item");
+
+// Test 14.3: Clear error when schema is missing (PGRST205)
+const schemaMissingRes = simulateToggleSaveListing({
+  userId: "user_1",
+  listingId: "12c46209-85b4-4bb5-860a-54325662edc9",
+  tableExists: false,
+});
+assert(!schemaMissingRes.success, "Saved-listing toggle fails when schema is unavailable");
+assert(schemaMissingRes.error.includes("schema not applied"), "Clear, diagnostic error returned when saved_listings table is missing");
+
+// Test 14.4: Optimistic rollback simulation on failure
+let clientSavedState = false;
+let clientFeedback = null;
+function simulateClientHeartClick(tableExists) {
+  const initial = clientSavedState;
+  clientSavedState = !initial; // Optimistic update
+  const res = simulateToggleSaveListing({ userId: "u1", listingId: "l1", tableExists });
+  if (!res.success) {
+    clientSavedState = initial; // Roll back
+    clientFeedback = res.error;
+  } else {
+    clientSavedState = res.saved;
+  }
+  return { finalState: clientSavedState, feedback: clientFeedback };
+}
+
+const clientFailureRun = simulateClientHeartClick(false);
+assert(clientFailureRun.finalState === false, "Client optimistic saved state rolls back to false on server failure");
+assert(clientFailureRun.feedback !== null, "User feedback message is set on failure so button does not silently do nothing");
+
+// -----------------------------------------------------------------------------
+// 15. IMAGE UPLOAD INTEGRITY & LISTING RELATIONS
+// -----------------------------------------------------------------------------
+console.log("\n▶ SUITE 15: Image Upload Integrity & Listing Relations");
+
+function simulateImageUploadWorkflow({ files = [], storageUploadFails = false, externalUrls = [] }) {
+  const uploadedUrls = [];
+  let submitError = null;
+
+  for (const f of files) {
+    if (storageUploadFails) {
+      submitError = `Failed to upload photo "${f.name}". Storage service error.`;
+      return { success: false, error: submitError, images: [] };
+    }
+    uploadedUrls.push(`https://storage.supabase.co/v1/object/public/listing-images/${f.name}`);
+  }
+
+  for (const ext of externalUrls) {
+    uploadedUrls.push(ext);
+  }
+
+  if (uploadedUrls.length === 0) {
+    uploadedUrls.push("/images/equipment_loader.jpg");
+  }
+
+  // Deduplicate preserving first occurrence
+  const seen = new Set();
+  const uniqueImages = uploadedUrls.filter((url) => {
+    const trimmed = (url || "").trim();
+    if (!trimmed || seen.has(trimmed)) return false;
+    seen.add(trimmed);
+    return true;
+  });
+
+  const relationRows = uniqueImages.map((url, idx) => ({
+    image_url: url,
+    is_primary: idx === 0,
+    sort_order: idx,
+  }));
+
+  return { success: true, images: uniqueImages, relationRows };
+}
+
+// Test 15.1: Failed upload is NOT silently treated as success
+const failedUploadRes = simulateImageUploadWorkflow({
+  files: [{ name: "excavator-boom.jpg" }],
+  storageUploadFails: true,
+});
+assert(!failedUploadRes.success, "Failed photo upload causes submission to fail");
+assert(failedUploadRes.error.includes("excavator-boom.jpg"), "Error explicitly identifies the failed image file");
+assert(!failedUploadRes.images.includes("/images/equipment_loader.jpg"), "Failed upload does NOT silently insert fallback loader image");
+
+// Test 15.2: Successful uploads create ordered relation rows
+const successUploadRes = simulateImageUploadWorkflow({
+  files: [{ name: "front.jpg" }, { name: "side.jpg" }],
+  storageUploadFails: false,
+});
+assert(successUploadRes.success && successUploadRes.images.length === 2, "Successful photo upload persists all image URLs");
+assert(successUploadRes.relationRows[0].is_primary === true, "First image is marked is_primary: true");
+assert(successUploadRes.relationRows[0].sort_order === 0, "First image has sort_order: 0");
+assert(successUploadRes.relationRows[1].sort_order === 1, "Second image has sort_order: 1");
+
+// Test 15.3: Duplicate URLs in payload are deduplicated
+const dupeUploadRes = simulateImageUploadWorkflow({
+  files: [{ name: "same.jpg" }],
+  externalUrls: ["https://storage.supabase.co/v1/object/public/listing-images/same.jpg", "https://img.com/other.jpg"],
+});
+assert(dupeUploadRes.images.length === 2, "Duplicate URLs are deduplicated to single occurrence");
+assert(dupeUploadRes.relationRows.length === 2, "Relation rows insert only deduplicated images");
+
+// -----------------------------------------------------------------------------
+// 16. DASHBOARD, CHAT & ADMIN AUTHORIZATION BOUNDARIES
+// -----------------------------------------------------------------------------
+console.log("\n▶ SUITE 16: Dashboard, Chat & Admin Authorization Boundaries");
+
+// Test 16.1: Dashboard optimistic state rollback on error
+let dashboardRentals = [{ id: "bk-1", status: "pending" }];
+function simulateDashboardCancel({ bookingId, shouldFail = false }) {
+  const previous = dashboardRentals;
+  dashboardRentals = dashboardRentals.map((b) => (b.id === bookingId ? { ...b, status: "cancelled" } : b));
+  if (shouldFail) {
+    dashboardRentals = previous; // Roll back
+    return { success: false, error: "Database network failure." };
+  }
+  return { success: true };
+}
+
+const cancelFail = simulateDashboardCancel({ bookingId: "bk-1", shouldFail: true });
+assert(!cancelFail.success, "Dashboard action failure reported");
+assert(dashboardRentals[0].status === "pending", "Dashboard optimistic status rolls back to 'pending' on action failure");
+
+// Test 16.2: Conversation RPC requires participant identity
+function simulateGetOrCreateConversation({ callerId, booking, isAdmin = false }) {
+  if (!callerId) return { success: false, error: "Authentication required", code: "42501" };
+  if (!booking) return { success: false, error: "Booking not found", code: "02000" };
+  const isParticipant = callerId === booking.renter_id || callerId === booking.owner_id;
+  if (!isParticipant && !isAdmin) {
+    return { success: false, error: "Unauthorized: Caller is not a participant", code: "42501" };
+  }
+  if (!["accepted", "paid", "confirmed", "active", "completed"].includes(booking.status) && !isAdmin) {
+    return { success: false, error: "Messaging is only unlocked for accepted rental transactions", code: "42501" };
+  }
+  return { success: true, conversationId: "conv-" + booking.id };
+}
+
+const strangerChat = simulateGetOrCreateConversation({
+  callerId: "user_intruder",
+  booking: { id: "bk-1", renter_id: "user_a", owner_id: "user_b", status: "accepted" },
+});
+assert(!strangerChat.success && strangerChat.code === "42501", "Unauthorized stranger CANNOT open booking conversation");
+
+const pendingBookingChat = simulateGetOrCreateConversation({
+  callerId: "user_a",
+  booking: { id: "bk-1", renter_id: "user_a", owner_id: "user_b", status: "pending" },
+});
+assert(!pendingBookingChat.success, "Conversation cannot be unlocked while booking status is pending review");
+
+const acceptedBookingChat = simulateGetOrCreateConversation({
+  callerId: "user_a",
+  booking: { id: "bk-1", renter_id: "user_a", owner_id: "user_b", status: "accepted" },
+});
+assert(acceptedBookingChat.success, "Conversation unlocks for participant once booking is accepted");
+
+// Test 16.3: Message immutability trigger simulation
+function simulateMessageMutation({ op, callerId, originalMessage, newContent, newReadAt }) {
+  if (op === "DELETE") {
+    return { allowed: false, error: "Messages cannot be deleted. History must be preserved for dispute resolution." };
+  }
+  if (op === "UPDATE") {
+    if (newContent !== undefined && newContent !== originalMessage.content) {
+      return { allowed: false, error: "Message content is immutable." };
+    }
+    if (newReadAt && callerId === originalMessage.sender_id) {
+      return { allowed: false, error: "Senders cannot mark their own messages as read." };
+    }
+    return { allowed: true, message: { ...originalMessage, read_at: newReadAt } };
+  }
+}
+
+const deleteMsgRes = simulateMessageMutation({ op: "DELETE", callerId: "user_a", originalMessage: { id: "m1" } });
+assert(!deleteMsgRes.allowed, "Messages CANNOT be deleted (preserves dispute resolution history)");
+
+const editMsgRes = simulateMessageMutation({
+  op: "UPDATE",
+  callerId: "user_a",
+  originalMessage: { id: "m1", content: "Original terms", sender_id: "user_a" },
+  newContent: "Altered terms",
+});
+assert(!editMsgRes.allowed, "Message content CANNOT be altered once sent (message immutability guaranteed)");
+
+// -----------------------------------------------------------------------------
+// 17. CLERK AUTHENTICATION & REDIRECT PRESERVATION
+// -----------------------------------------------------------------------------
+console.log("\n▶ SUITE 17: Clerk Authentication & Redirect Invariant Verification");
+
+function simulateProxyRouteProtection(pathname, isSignedIn) {
+  const protectedRoutes = ["/listings/new", "/dashboard", "/admin"];
+  const isProtected = protectedRoutes.some((route) => pathname.startsWith(route));
+
+  if (!isProtected) {
+    return { allowed: true };
+  }
+
+  if (isSignedIn) {
+    return { allowed: true };
+  }
+
+  // Redirect to sign-in with preserved destination
+  const redirectUrl = `/sign-in?redirect_url=${encodeURIComponent(pathname)}`;
+  return { allowed: false, redirectUrl };
+}
+
+// Test 17.1: Protected routes require login and preserve destination
+const unauthedNewListing = simulateProxyRouteProtection("/listings/new", false);
+assert(!unauthedNewListing.allowed, "/listings/new requires authentication");
+assert(unauthedNewListing.redirectUrl.includes("redirect_url=%2Flistings%2Fnew"), "Redirect preservation retains intended /listings/new destination");
+
+const unauthedDashboard = simulateProxyRouteProtection("/dashboard", false);
+assert(!unauthedDashboard.allowed && unauthedDashboard.redirectUrl.includes("redirect_url=%2Fdashboard"), "Dashboard redirect preserves /dashboard destination");
+
+const unauthedAdmin = simulateProxyRouteProtection("/admin/users", false);
+assert(!unauthedAdmin.allowed && unauthedAdmin.redirectUrl.includes("redirect_url=%2Fadmin%2Fusers"), "Admin route redirect preserves /admin/users destination");
+
+// Test 17.2: Public routes never force sign-in redirects
+assert(simulateProxyRouteProtection("/", false).allowed, "Landing page is public");
+assert(simulateProxyRouteProtection("/listings", false).allowed, "Marketplace browse page is public");
+assert(simulateProxyRouteProtection("/listings/12c46209-85b4-4bb5-860a-54325662edc9", false).allowed, "Listing detail page is public");
+assert(simulateProxyRouteProtection("/sign-in", false).allowed, "Sign-in route is public and does not self-redirect");
+assert(simulateProxyRouteProtection("/sign-up", false).allowed, "Sign-up route is public and does not self-redirect");
+
+// -----------------------------------------------------------------------------
+// 18. DELETION, CANCELLATION, IDENTITY & REVIEWS VERIFICATION
+// -----------------------------------------------------------------------------
+console.log("\n▶ SUITE 18: Listing Deletion, Safe Cancellation, Identity & Reviews");
+
+// Simulation 18.1: Safe Listing Deletion / Archiving
+function simulateListingDeletion(listing, existingBookings) {
+  const activeStatuses = ["pending", "accepted", "paid", "active"];
+  const hasActiveBookings = existingBookings.some(
+    (b) => b.listing_id === listing.id && activeStatuses.includes(b.status)
+  );
+
+  if (hasActiveBookings) {
+    return {
+      allowed: false,
+      code: "ACTIVE_BOOKINGS_EXIST",
+      error: "Cannot remove listing while active or pending reservations exist.",
+    };
+  }
+
+  return {
+    allowed: true,
+    newStatus: "archived",
+    deleted_at: new Date().toISOString(),
+  };
+}
+
+const mockListingWithBookings = { id: "list-1", title: "Excavator CAT 320" };
+const activeBookingList = [
+  { id: "bk-1", listing_id: "list-1", status: "pending" },
+  { id: "bk-2", listing_id: "list-2", status: "completed" },
+];
+const clearBookingList = [
+  { id: "bk-3", listing_id: "list-1", status: "completed" },
+  { id: "bk-4", listing_id: "list-1", status: "cancelled" },
+];
+
+const deleteBlockedResult = simulateListingDeletion(mockListingWithBookings, activeBookingList);
+assert(!deleteBlockedResult.allowed && deleteBlockedResult.code === "ACTIVE_BOOKINGS_EXIST", "Listing deletion blocked when active/pending bookings exist");
+
+const deleteAllowedResult = simulateListingDeletion(mockListingWithBookings, clearBookingList);
+assert(deleteAllowedResult.allowed && deleteAllowedResult.newStatus === "archived", "Listing deletion succeeds via archiving when no active bookings exist");
+
+// Simulation 18.2: Safe Booking Cancellation Transitions
+function simulateBookingTransition(callerRole, currentStatus, targetStatus) {
+  if (callerRole === "renter") {
+    if (targetStatus === "cancelled") {
+      if (["pending", "accepted"].includes(currentStatus)) {
+        return { allowed: true, newStatus: "cancelled" };
+      }
+      return { allowed: false, code: "INVALID_TRANSITION", error: "Only pending or accepted reservations can be cancelled." };
+    }
+    return { allowed: false, code: "UNAUTHORIZED", error: "Renter cannot perform this transition." };
+  }
+
+  if (callerRole === "owner") {
+    if (targetStatus === "accepted") {
+      if (currentStatus === "pending") {
+        return { allowed: true, newStatus: "accepted" };
+      }
+      return { allowed: false, code: "INVALID_TRANSITION", error: "Only pending requests can be accepted." };
+    }
+    if (targetStatus === "cancelled") {
+      if (["pending", "accepted"].includes(currentStatus)) {
+        return { allowed: true, newStatus: "cancelled" };
+      }
+      return { allowed: false, code: "INVALID_TRANSITION", error: "Cannot decline or cancel a booking in current status." };
+    }
+  }
+
+  return { allowed: false, code: "UNAUTHORIZED", error: "Unauthorized status transition." };
+}
+
+assert(simulateBookingTransition("renter", "pending", "cancelled").allowed, "Renter can cancel pending booking");
+assert(simulateBookingTransition("renter", "accepted", "cancelled").allowed, "Renter can cancel accepted booking");
+assert(!simulateBookingTransition("renter", "active", "cancelled").allowed, "Renter cannot cancel active ongoing rental");
+assert(!simulateBookingTransition("renter", "completed", "cancelled").allowed, "Renter cannot cancel completed rental");
+assert(simulateBookingTransition("owner", "pending", "accepted").allowed, "Owner can accept pending request");
+assert(!simulateBookingTransition("owner", "accepted", "accepted").allowed, "Owner cannot accept already accepted booking");
+assert(simulateBookingTransition("owner", "pending", "cancelled").allowed, "Owner can decline pending request");
+assert(!simulateBookingTransition("owner", "completed", "cancelled").allowed, "Owner cannot decline/cancel completed rental");
+
+// Simulation 18.3: Readable User Identity & Privacy Preservation
+function formatUserDisplayName(profile, rawUserId) {
+  if (profile) {
+    const fullName = [profile.first_name, profile.last_name].filter(Boolean).join(" ").trim();
+    if (fullName) return fullName;
+  }
+  if (rawUserId && rawUserId.startsWith("mock-")) return "Demo Renter";
+  return "Verified Renter";
+}
+
+assert(formatUserDisplayName({ first_name: "Maria", last_name: "Santos" }, "user_123") === "Maria Santos", "Renders full name Maria Santos");
+assert(formatUserDisplayName({ first_name: "Carlos", last_name: null }, "user_456") === "Carlos", "Renders single name Carlos");
+assert(formatUserDisplayName(null, "user_3KmK4yh1ZXXabc123") === "Verified Renter", "Falls back to Verified Renter without leaking raw Clerk ID user_3KmK...");
+assert(formatUserDisplayName(null, "mock-user-1") === "Demo Renter", "Renders Demo Renter for mock user");
+
+// Simulation 18.4: Lister Reviews Validation & Eligibility
+function simulateReviewSubmission({ reviewerId, listerId, bookingStatus, rating, comment }) {
+  if (!reviewerId) return { error: "AUTH_REQUIRED" };
+  if (!rating || rating < 1 || rating > 5 || !Number.isInteger(rating)) return { error: "INVALID_INPUT" };
+  if (reviewerId === listerId) return { error: "SELF_REVIEW" };
+  if (!["completed", "returned"].includes(bookingStatus)) return { error: "NOT_ELIGIBLE" };
+  if (comment && comment.length > 1000) return { error: "INVALID_INPUT" };
+  return { success: true };
+}
+
+assert(simulateReviewSubmission({ reviewerId: "renter-1", listerId: "lister-2", bookingStatus: "completed", rating: 5 }).success, "Eligible completed booking review succeeds");
+assert(simulateReviewSubmission({ reviewerId: "renter-1", listerId: "lister-2", bookingStatus: "returned", rating: 4 }).success, "Eligible returned booking review succeeds");
+assert(simulateReviewSubmission({ reviewerId: "user-1", listerId: "user-1", bookingStatus: "completed", rating: 5 }).error === "SELF_REVIEW", "Self-review is strictly rejected");
+assert(simulateReviewSubmission({ reviewerId: "renter-1", listerId: "lister-2", bookingStatus: "pending", rating: 5 }).error === "NOT_ELIGIBLE", "Pending booking review is strictly rejected");
+assert(simulateReviewSubmission({ reviewerId: "renter-1", listerId: "lister-2", bookingStatus: "active", rating: 5 }).error === "NOT_ELIGIBLE", "Active in-progress booking review is strictly rejected");
+assert(simulateReviewSubmission({ reviewerId: "renter-1", listerId: "lister-2", bookingStatus: "completed", rating: 6 }).error === "INVALID_INPUT", "Invalid rating (>5) is rejected");
+
+// -----------------------------------------------------------------------------
+// 19. INTEGRITY, REVIEWS, REPORTING & LIFECYCLE OVERHAUL VERIFICATION
+// -----------------------------------------------------------------------------
+console.log("\n▶ SUITE 19: Marketplace Integrity, Reviews, Reporting & Lifecycle Overhaul");
+
+// 19.1: Physical Deletion vs Historical Audit Archiving Simulation
+function simulateAuthoritativeListingRemoval(listing, bookings, openReports = []) {
+  if (openReports && openReports.length > 0) {
+    return {
+      success: false,
+      code: "RESTRICTED",
+      error: "Cannot delete listing while active moderation reports are under review.",
+    };
+  }
+
+  const activeBookings = bookings.filter((b) =>
+    ["pending", "accepted", "paid", "active"].includes(b.status)
+  );
+  if (activeBookings.length > 0) {
+    return {
+      success: false,
+      code: "ACTIVE_BOOKINGS_EXIST",
+      error: "Cannot remove listing while active or pending reservations exist.",
+    };
+  }
+
+  const hasHistorical = bookings.some((b) =>
+    ["completed", "returned", "cancelled"].includes(b.status)
+  );
+  if (hasHistorical) {
+    return {
+      success: false,
+      code: "HISTORICAL_RECORDS_EXIST",
+      action: "prompt_archive",
+      error: "This equipment has historical rental records that must be retained for audit compliance.",
+    };
+  }
+
+  // 0 bookings: physical hard delete from database & storage cleanup
+  return {
+    success: true,
+    mode: "deleted",
+    storagePhotosCleaned: true,
+    deletedFromDb: true,
+  };
+}
+
+const unbookedListing = { id: "list-zero", title: "Never Rented Generator" };
+const historicalListing = { id: "list-hist", title: "Historical Backhoe" };
+const activeListingItem = { id: "list-act", title: "Active Bulldozer" };
+
+const zeroResult = simulateAuthoritativeListingRemoval(unbookedListing, []);
+assert(zeroResult.success && zeroResult.mode === "deleted", "0-booking listing is physically hard-deleted from database");
+assert(zeroResult.storagePhotosCleaned === true, "Storage photos are cleaned up on physical deletion");
+
+const repResult = simulateAuthoritativeListingRemoval(unbookedListing, [], [{ id: "r1", status: "pending" }]);
+assert(!repResult.success && repResult.code === "RESTRICTED", "Active moderation reports block physical deletion");
+
+const histResult = simulateAuthoritativeListingRemoval(historicalListing, [{ id: "b1", status: "completed" }]);
+assert(!histResult.success && histResult.code === "HISTORICAL_RECORDS_EXIST", "Historical bookings block hard delete to protect audit trail");
+assert(histResult.action === "prompt_archive", "Historical bookings prompt user with safe archiving option");
+
+const actResult = simulateAuthoritativeListingRemoval(activeListingItem, [{ id: "b2", status: "accepted" }]);
+assert(!actResult.success && actResult.code === "ACTIVE_BOOKINGS_EXIST", "Active/pending bookings block deletion");
+
+// 19.2: Canonical Equipment Identifier Normalization
+function normalizeAssetIdentifierTest(raw) {
+  if (!raw) return null;
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  const lower = trimmed.toLowerCase();
+  const trivialValues = new Set(["n/a", "na", "none", "null", "nil", "unknown", "0", "0000", "xxx"]);
+  if (trivialValues.has(lower)) return null;
+  const alphanumericOnly = lower.replace(/[^a-z0-9]/gi, "");
+  if (alphanumericOnly.length < 3) return null;
+  return alphanumericOnly;
+}
+
+assert(normalizeAssetIdentifierTest("  VIN-1HGCR2F83HA-001234  ") === "vin1hgcr2f83ha001234", "Strips spaces, hyphens, and casing from VIN");
+assert(normalizeAssetIdentifierTest("N/A") === null, "Treats N/A as strictly null");
+assert(normalizeAssetIdentifierTest("none") === null, "Treats 'none' as strictly null");
+assert(normalizeAssetIdentifierTest("00") === null, "Treats short/trivial value as null (<3 alphanumeric chars)");
+assert(normalizeAssetIdentifierTest("CAT-320D-2024") === "cat320d2024", "Normalizes machinery chassis code");
+
+// 19.3: Multi-Attribute Duplicate Scoring & Shadow Quarantine Simulation
+function simulateEvaluateDuplicateSignals(candidate, existing) {
+  let score = 0;
+  const isSameOwner = candidate.ownerId === existing.ownerId;
+  const reasons = [];
+
+  const normCandId = normalizeAssetIdentifierTest(candidate.serialOrVin);
+  const normExtId = normalizeAssetIdentifierTest(existing.assetIdentifier);
+
+  if (normCandId && normExtId && normCandId === normExtId) {
+    score += 0.85;
+    reasons.push("Identical physical serial number or VIN detected.");
+  }
+
+  if (candidate.categoryId === existing.categoryId) {
+    if (candidate.title.trim().toLowerCase() === existing.title.trim().toLowerCase()) {
+      score += isSameOwner ? 0.35 : 0.25;
+      reasons.push("Identical title in same category.");
+    }
+  }
+
+  if (candidate.make && existing.make && candidate.make.toLowerCase() === existing.make.toLowerCase()) {
+    if (candidate.model && existing.model && candidate.model.toLowerCase() === existing.model.toLowerCase()) {
+      score += 0.2;
+      reasons.push("Exact make and model match.");
+    }
+  }
+
+  const confidence = Math.min(1.0, score);
+  let classification = "UNIQUE";
+  let requiresQuarantine = false;
+
+  if (confidence >= 0.85) {
+    classification = "CONFIRMED_DUPLICATE";
+    requiresQuarantine = !isSameOwner;
+  } else if (confidence >= 0.65) {
+    classification = "SUSPECTED_DUPLICATE";
+    requiresQuarantine = true;
+  }
+
+  return { classification, confidence, isSameOwner, requiresQuarantine, reasons };
+}
+
+// Case A: Same owner reposting same physical serial number
+const sameOwnerDup = simulateEvaluateDuplicateSignals(
+  { ownerId: "user-1", categoryId: "excavators", title: "CAT 320D", serialOrVin: "CAT-320-9988", make: "Caterpillar", model: "320D" },
+  { ownerId: "user-1", categoryId: "excavators", title: "CAT 320D", assetIdentifier: "cat3209988", make: "Caterpillar", model: "320D" }
+);
+assert(sameOwnerDup.classification === "CONFIRMED_DUPLICATE" && sameOwnerDup.isSameOwner, "Identical serial by same owner classified as CONFIRMED_DUPLICATE");
+assert(!sameOwnerDup.requiresQuarantine, "Same owner duplicate blocked directly rather than quarantined");
+
+// Case B: Different owner posting identical equipment serial (collision / fraud)
+const crossOwnerDup = simulateEvaluateDuplicateSignals(
+  { ownerId: "user-2", categoryId: "excavators", title: "CAT 320D", serialOrVin: "CAT-320-9988", make: "Caterpillar", model: "320D" },
+  { ownerId: "user-1", categoryId: "excavators", title: "CAT 320D", assetIdentifier: "cat3209988", make: "Caterpillar", model: "320D" }
+);
+assert(crossOwnerDup.classification === "CONFIRMED_DUPLICATE" && !crossOwnerDup.isSameOwner, "Cross-account serial collision detected");
+assert(crossOwnerDup.requiresQuarantine, "Cross-account collision requires shadow_quarantine for admin verification");
+
+// 19.4: Three-Strike Policy & Cooldown Evaluation
+function simulateStrikePolicy(currentStrikeCount) {
+  if (currentStrikeCount <= 1) {
+    return { action: "ALLOW_WITH_WARNING" };
+  }
+  if (currentStrikeCount === 2) {
+    return { action: "APPLY_24H_COOLDOWN", cooldownHours: 24 };
+  }
+  return { action: "REQUIRE_MANDATORY_ADMIN_REVIEW" };
+}
+
+assert(simulateStrikePolicy(1).action === "ALLOW_WITH_WARNING", "Strike 1 allows with warning");
+assert(simulateStrikePolicy(2).action === "APPLY_24H_COOLDOWN", "Strike 2 applies 24-hour cooldown");
+assert(simulateStrikePolicy(3).action === "REQUIRE_MANDATORY_ADMIN_REVIEW", "Strike 3 requires mandatory admin review");
+
+// 19.5: Category Stock-Slot Allowance (Quota)
+function simulateCategoryQuota(activeCount, categorySlug) {
+  const quotas = { heavy_machinery: 8, power_tools: 15, default: 5 };
+  const max = quotas[categorySlug] || quotas.default;
+  return { allowed: activeCount < max, maxAllowed: max };
+}
+
+assert(simulateCategoryQuota(4, "heavy_machinery").allowed, "4/8 heavy machinery listings allowed");
+assert(!simulateCategoryQuota(8, "heavy_machinery").allowed, "8/8 heavy machinery listings rejected by quota");
+assert(simulateCategoryQuota(10, "power_tools").allowed, "10/15 power tools listings allowed");
+
+// 19.6: Preliminary Coordination Feedback Simulation
+function simulatePreliminaryFeedback({ bookingStatus, callerId, renterId, ownerId, commScore, punctScore }) {
+  if (!["accepted", "paid", "active", "confirmed"].includes(bookingStatus)) {
+    return { success: false, code: "NOT_ELIGIBLE", error: "Only accepted bookings can receive preliminary coordination feedback" };
+  }
+  if (callerId !== renterId && callerId !== ownerId) {
+    return { success: false, code: "UNAUTHORIZED", error: "Not a booking participant" };
+  }
+  if (!commScore || commScore < 1 || commScore > 5 || !punctScore || punctScore < 1 || punctScore > 5) {
+    return { success: false, code: "INVALID_INPUT" };
+  }
+  return {
+    success: true,
+    isPublicStarRating: false, // Explicit platform coordination invariant
+    privateOperationsOnly: true,
+  };
+}
+
+const validCoordination = simulatePreliminaryFeedback({
+  bookingStatus: "accepted",
+  callerId: "renter-1",
+  renterId: "renter-1",
+  ownerId: "host-1",
+  commScore: 5,
+  punctScore: 4,
+});
+assert(validCoordination.success, "Preliminary coordination feedback succeeds for accepted booking");
+assert(validCoordination.isPublicStarRating === false, "Preliminary coordination feedback is explicitly excluded from public star ratings");
+
+const pendingCoordination = simulatePreliminaryFeedback({
+  bookingStatus: "pending",
+  callerId: "renter-1",
+  renterId: "renter-1",
+  ownerId: "host-1",
+  commScore: 5,
+  punctScore: 5,
+});
+assert(!pendingCoordination.success && pendingCoordination.code === "NOT_ELIGIBLE", "Preliminary coordination rejected on pending booking");
+
+// 19.7: Reciprocal Host-to-Renter Review Simulation
+function simulateRenterReview({ bookingStatus, callerId, ownerId, renterId, rating }) {
+  if (!["completed", "returned"].includes(bookingStatus)) {
+    return { success: false, code: "NOT_ELIGIBLE" };
+  }
+  if (callerId !== ownerId) {
+    return { success: false, code: "UNAUTHORIZED", error: "Only equipment host can review renter" };
+  }
+  if (callerId === renterId) {
+    return { success: false, code: "SELF_REVIEW" };
+  }
+  if (!rating || rating < 1 || rating > 5) {
+    return { success: false, code: "INVALID_INPUT" };
+  }
+  return { success: true };
+}
+
+const hostReviewsRenter = simulateRenterReview({
+  bookingStatus: "completed",
+  callerId: "host-1",
+  ownerId: "host-1",
+  renterId: "renter-2",
+  rating: 5,
+});
+assert(hostReviewsRenter.success, "Host successfully submits reciprocal review for verified renter");
+
+const strangerReviewsRenter = simulateRenterReview({
+  bookingStatus: "completed",
+  callerId: "stranger-99",
+  ownerId: "host-1",
+  renterId: "renter-2",
+  rating: 5,
+});
+assert(!strangerReviewsRenter.success && strangerReviewsRenter.code === "UNAUTHORIZED", "Stranger cannot review renter");
+
+// 19.8: Reporting System (Listing & Profile) Simulation
+function simulatePlatformReport({ reporterId, targetType, targetOwnerId, reason }) {
+  if (!reporterId) return { success: false, code: "AUTH_REQUIRED" };
+  if (reporterId === targetOwnerId) return { success: false, code: "SELF_REPORT", error: "Cannot report own asset or profile" };
+  if (!reason || reason.trim().length < 3) return { success: false, code: "INVALID_INPUT" };
+  return { success: true, targetType, status: "pending" };
+}
+
+const reportListing = simulatePlatformReport({ reporterId: "user-a", targetType: "listing", targetOwnerId: "user-b", reason: "Damaged hydraulics not as pictured" });
+assert(reportListing.success && reportListing.status === "pending", "Listing report successfully submitted with pending status");
+
+const reportProfile = simulatePlatformReport({ reporterId: "user-a", targetType: "profile", targetOwnerId: "user-c", reason: "Fraudulent contact behavior" });
+assert(reportProfile.success && reportProfile.targetType === "profile", "Profile report successfully submitted");
+
+const selfReport = simulatePlatformReport({ reporterId: "user-a", targetType: "listing", targetOwnerId: "user-a", reason: "Test reason" });
+assert(!selfReport.success && selfReport.code === "SELF_REPORT", "Self-reporting is strictly blocked");
+
+// 19.9: Concurrency-Safe Duplicate Strike Serialization Simulation
+function simulateTransactionFlow({ useAdvisoryLock = true }) {
+  const committedTable = [];
+  let advisoryLockHeldBy = null;
+  const targetUser = "user_concurrent";
+
+  // Step 1: T1 begins and executes BEFORE INSERT trigger
+  if (useAdvisoryLock) {
+    advisoryLockHeldBy = "T1";
+  }
+
+  // T1 reads existing strike count from committed table
+  const t1PriorStrike = committedTable
+    .filter((r) => r.user_id === targetUser)
+    .reduce((max, r) => Math.max(max, r.strike_count), 0);
+  const t1NewStrike = t1PriorStrike + 1;
+  const t1Cooldown = t1NewStrike >= 2 ? "24_HOURS" : null;
+
+  // Step 2: T2 starts concurrently before T1 commits
+  let t2Blocked = false;
+  if (useAdvisoryLock && advisoryLockHeldBy !== null) {
+    t2Blocked = true; // T2 must wait for transaction-level advisory lock
+  }
+
+  let t2NewStrike;
+  let t2Cooldown;
+
+  if (!useAdvisoryLock) {
+    // Vulnerable state: T2 reads committed table concurrently before T1 commits
+    const t2PriorStrike = committedTable
+      .filter((r) => r.user_id === targetUser)
+      .reduce((max, r) => Math.max(max, r.strike_count), 0);
+    t2NewStrike = t2PriorStrike + 1;
+    t2Cooldown = t2NewStrike >= 2 ? "24_HOURS" : null;
+
+    committedTable.push({ user_id: targetUser, strike_count: t1NewStrike, cooldown: t1Cooldown });
+    committedTable.push({ user_id: targetUser, strike_count: t2NewStrike, cooldown: t2Cooldown });
+  } else {
+    // Protected state: T1 commits and releases advisory lock
+    committedTable.push({ user_id: targetUser, strike_count: t1NewStrike, cooldown: t1Cooldown });
+    advisoryLockHeldBy = null;
+
+    // T2 unblocks, acquires advisory lock, and reads committed table
+    advisoryLockHeldBy = "T2";
+    const t2PriorStrike = committedTable
+      .filter((r) => r.user_id === targetUser)
+      .reduce((max, r) => Math.max(max, r.strike_count), 0);
+    t2NewStrike = t2PriorStrike + 1;
+    t2Cooldown = t2NewStrike >= 2 ? "24_HOURS" : null;
+
+    committedTable.push({ user_id: targetUser, strike_count: t2NewStrike, cooldown: t2Cooldown });
+    advisoryLockHeldBy = null;
+  }
+
+  return {
+    useAdvisoryLock,
+    t2WasBlocked: t2Blocked,
+    t1Strike: t1NewStrike,
+    t2Strike: t2NewStrike,
+    t1Cooldown,
+    t2Cooldown,
+    committedRecords: committedTable,
+  };
+}
+
+function simulateRollbackFlow() {
+  const committedTable = [];
+  const targetUser = "user_rollback";
+
+  // T1 acquires lock, calculates strike 1, but transaction aborts / rolls back
+  let advisoryLock = "T1";
+  // T1 rolls back -> lock released, 0 committed records
+  advisoryLock = null;
+
+  // T2 acquires lock, calculates strike
+  advisoryLock = "T2";
+  const prior = committedTable
+    .filter((r) => r.user_id === targetUser)
+    .reduce((max, r) => Math.max(max, r.strike_count), 0);
+  const nextStrike = prior + 1;
+  committedTable.push({ user_id: targetUser, strike_count: nextStrike });
+  advisoryLock = null;
+
+  return { t2Strike: nextStrike, committedCount: committedTable.length };
+}
+
+// Subtest A: Unlocked concurrency demonstrates race condition
+const resUnlocked = simulateTransactionFlow({ useAdvisoryLock: false });
+assert(resUnlocked.t1Strike === 1 && resUnlocked.t2Strike === 1, "Vulnerable engine confirms race condition where concurrent inserts both get strike 1");
+assert(resUnlocked.t2Cooldown === null, "Vulnerable engine bypasses cooldown because both computed strike 1");
+
+// Subtest B: Advisory lock serializes concurrent inserts for same user
+const resLocked = simulateTransactionFlow({ useAdvisoryLock: true });
+assert(resLocked.t2WasBlocked === true, "Advisory lock forces concurrent transaction to block until initial transaction commits");
+assert(resLocked.t1Strike === 1 && resLocked.t2Strike === 2, "Advisory lock serialized transactions: strike 1 followed by strike 2");
+assert(resLocked.t2Cooldown === "24_HOURS", "Strike 2 transaction received 24-hour cooldown automatically upon serialization");
+
+// Subtest C: Rollback handling releases lock and leaves count unincremented
+const resRollback = simulateRollbackFlow();
+assert(resRollback.t2Strike === 1 && resRollback.committedCount === 1, "Subsequent transaction after rollback computes strike 1 without phantom increments");
+
+// 19.10: Static Migration 015 File Structure & Security Invariants
+const migration015Path = path.join(__dirname, "../supabase/migrations/015_moderation_and_integrity_overhaul.sql");
+const migration015Content = fs.readFileSync(migration015Path, "utf-8");
+
+assert(migration015Content.includes("BEGIN;"), "Migration 015 is wrapped in BEGIN transactional block");
+assert(migration015Content.includes("COMMIT;"), "Migration 015 concludes with COMMIT statement");
+assert(
+  migration015Content.includes("pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(NEW.user_id, 0))"),
+  "Migration 015 enforces 64-bit advisory transaction lock via hashtextextended"
+);
+assert(
+  migration015Content.includes("idx_duplicate_enforcements_user_created"),
+  "Migration 015 includes composite index for duplicate enforcement audit trail"
+);
+assert(
+  !migration015Content.includes("pg_trigger_depth() > 1"),
+  "Migration 015 does not contain vulnerable pg_trigger_depth() > 1 bypass"
+);
+
+// Execution order invariant: duplicate_enforcements table must precede protect_listing_security
+const duplicateEnforcementsIdx = migration015Content.indexOf("CREATE TABLE IF NOT EXISTS public.duplicate_enforcements");
+const protectListingSecurityIdx = migration015Content.indexOf("CREATE OR REPLACE FUNCTION public.protect_listing_security()");
+assert(
+  duplicateEnforcementsIdx !== -1 && protectListingSecurityIdx !== -1 && duplicateEnforcementsIdx < protectListingSecurityIdx,
+  "Migration 015 creates duplicate_enforcements table before protect_listing_security() to satisfy PostgreSQL plpgsql compile dependency"
+);
+
+// Least-privilege grant invariants: anon and authenticated must never receive unrestricted ALL on moderation tables
+assert(
+  !migration015Content.includes("GRANT ALL ON TABLE public.duplicate_enforcements TO postgres, anon"),
+  "Migration 015 does NOT grant ALL on duplicate_enforcements to anon/authenticated"
+);
+assert(
+  migration015Content.includes("GRANT SELECT ON TABLE public.duplicate_enforcements TO authenticated;"),
+  "Migration 015 grants SELECT ONLY on duplicate_enforcements to authenticated users (strikes are system/admin managed)"
+);
+assert(
+  !migration015Content.includes("GRANT ALL ON TABLE public.profile_reports TO postgres, anon"),
+  "Migration 015 restricts profile_reports permissions following least-privilege"
+);
+assert(
+  !migration015Content.includes("GRANT ALL ON TABLE public.preliminary_feedback TO postgres, anon"),
+  "Migration 015 restricts preliminary_feedback permissions following least-privilege"
+);
+
+// Fixed search_path invariants on all SECURITY DEFINER functions to prevent search_path hijacking
+const secDefinerCount = (migration015Content.match(/SECURITY DEFINER/g) || []).length;
+const safeSearchPathCount = (migration015Content.match(/SET search_path = public, pg_catalog/g) || []).length;
+assert(
+  secDefinerCount === 3 && safeSearchPathCount === 3,
+  "All 3 SECURITY DEFINER functions in Migration 015 enforce fixed search_path = public, pg_catalog"
+);
+
+// Function execute revocation invariants
+assert(
+  migration015Content.includes("REVOKE EXECUTE ON FUNCTION public.is_active_admin() FROM PUBLIC;"),
+  "Migration 015 revokes PUBLIC execution on is_active_admin()"
+);
+assert(
+  migration015Content.includes("REVOKE EXECUTE ON FUNCTION public.compute_duplicate_enforcement_strike() FROM PUBLIC;"),
+  "Migration 015 revokes PUBLIC execution on compute_duplicate_enforcement_strike()"
+);
+assert(
+  migration015Content.includes("REVOKE EXECUTE ON FUNCTION public.protect_listing_security() FROM PUBLIC;"),
+  "Migration 015 revokes PUBLIC execution on protect_listing_security()"
+);
+
+// -----------------------------------------------------------------------------
+// 20. PERFORMANCE OPTIMIZATIONS, PAGINATION & CACHING INVARIANTS
+// -----------------------------------------------------------------------------
+console.log("\n▶ SUITE 20: Performance Optimizations, Server-Side Pagination & Caching Invariants");
+
+// 20.1: Pagination Math & Boundary Clamping Invariants
+function computePaginationBounds(totalCount, rawPage, rawLimit) {
+  const page = Math.max(1, Number(rawPage) || 1);
+  const pageSize = Math.min(100, Math.max(1, Number(rawLimit) || 24));
+  const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
+  const offset = (page - 1) * pageSize;
+  const clampedPage = Math.min(page, totalPages);
+  return { page, pageSize, totalPages, offset, clampedPage };
+}
+
+const p1 = computePaginationBounds(50, 1, 24);
+assert(p1.page === 1 && p1.pageSize === 24 && p1.totalPages === 3 && p1.offset === 0, "Page 1 of 50 with limit 24 computes 3 total pages and 0 offset");
+
+const p2 = computePaginationBounds(50, 2, 24);
+assert(p2.offset === 24, "Page 2 with limit 24 computes offset 24");
+
+const pNegative = computePaginationBounds(50, -5, 24);
+assert(pNegative.page === 1, "Negative page is safely clamped to page 1");
+
+const pExcessiveLimit = computePaginationBounds(50, 1, 9999);
+assert(pExcessiveLimit.pageSize === 100, "Unreasonably large limit is capped at 100 to prevent denial-of-service memory pressure");
+
+const pZeroItems = computePaginationBounds(0, 1, 24);
+assert(pZeroItems.totalPages === 1, "Zero items returns 1 total page rather than 0 or NaN");
+
+// 20.2: Static Code Invariant - Elimination of blocking currentUser() in request paths
+const adminLayoutContent = fs.readFileSync(path.join(__dirname, "../app/admin/layout.tsx"), "utf-8");
+assert(!adminLayoutContent.includes("currentUser("), "AdminLayout does NOT execute blocking currentUser() external API call");
+assert(adminLayoutContent.includes("auth()"), "AdminLayout derives identity securely via local auth() session claims");
+
+const adminActionsContent = fs.readFileSync(path.join(__dirname, "../app/admin/actions.ts"), "utf-8");
+assert(!adminActionsContent.includes("currentUser("), "Admin actions do NOT execute blocking currentUser() external API call");
+
+const dashboardActionsContent = fs.readFileSync(path.join(__dirname, "../app/dashboard/actions.ts"), "utf-8");
+assert(!dashboardActionsContent.includes("currentUser("), "Dashboard actions do NOT execute blocking currentUser() external API call");
+
+// 20.3: Static Code Invariant - Category Caching with unstable_cache
+const marketplaceContent = fs.readFileSync(path.join(__dirname, "../lib/supabase/marketplace.ts"), "utf-8");
+assert(marketplaceContent.includes("unstable_cache"), "lib/supabase/marketplace.ts utilizes Next.js unstable_cache for public reference data");
+assert(marketplaceContent.includes("marketplace-categories"), "Marketplace categories are tagged with explicit cache tag for revalidation");
+assert(marketplaceContent.includes(".range(offset, offset + pageSize - 1)"), "PostgREST queries enforce server-side SQL pagination range");
+
+// 20.4: Static Code Invariant - Parallelized Admin Overview Queries
+const adminSupabaseContent = fs.readFileSync(path.join(__dirname, "../lib/supabase/admin.ts"), "utf-8");
+assert(adminSupabaseContent.includes("Promise.all(["), "Admin overview stats queries are parallelized with Promise.all");
+
+// 20.5: Static Code Invariant - Hero Image Deferral
+const heroContent = fs.readFileSync(path.join(__dirname, "../components/landing/hero.tsx"), "utf-8");
+assert(heroContent.includes("shouldRenderImage"), "Hero carousel defers non-active background slides to save initial paint network weight");
+
+// -----------------------------------------------------------------------------
+// 21. EQUIPMENT REPORTS & MODERATION INTEGRITY (BUG 1)
+// -----------------------------------------------------------------------------
+console.log("\n▶ SUITE 21: Equipment Reports & Moderation Integrity");
+
+// 21.1: Functional Self-Reporting and Deduplication Simulation
+function simulateListingReportSubmission({
+  reporterId,
+  targetOwnerId,
+  targetListingId,
+  reason,
+  details,
+  existingReports = [],
+}) {
+  if (!reporterId) {
+    return { success: false, code: "AUTH_REQUIRED", error: "Authentication required." };
+  }
+  if (!targetOwnerId || !targetListingId) {
+    return { success: false, code: "NOT_FOUND", error: "Listing not found." };
+  }
+  if (reporterId === targetOwnerId) {
+    return {
+      success: false,
+      code: "SELF_REPORT",
+      error: "You cannot report your own equipment listing.",
+    };
+  }
+  if (!reason || typeof reason !== "string" || reason.trim().length < 5) {
+    return {
+      success: false,
+      code: "INVALID_INPUT",
+      error: "Please select or provide a valid reason for this report (at least 5 characters).",
+    };
+  }
+  if (details && typeof details === "string" && details.length > 1000) {
+    return {
+      success: false,
+      code: "INVALID_INPUT",
+      error: "Report details must not exceed 1000 characters.",
+    };
+  }
+  const hasDuplicate = existingReports.some(
+    (r) =>
+      r.reporter_id === reporterId &&
+      r.listing_id === targetListingId &&
+      ["pending", "investigating"].includes(r.status)
+  );
+  if (hasDuplicate) {
+    return {
+      success: false,
+      code: "DUPLICATE_REPORT",
+      error: "You have already submitted a pending report for this listing.",
+    };
+  }
+  return {
+    success: true,
+    reportId: "rep_" + Math.random().toString(36).substring(2, 9),
+    status: "pending",
+  };
+}
+
+const selfReportSubmission = simulateListingReportSubmission({
+  reporterId: "user_owner_1",
+  targetOwnerId: "user_owner_1",
+  targetListingId: "lst_101",
+  reason: "Suspected duplicate equipment",
+});
+assert(!selfReportSubmission.success && selfReportSubmission.code === "SELF_REPORT", "Owner is blocked from self-reporting own equipment listing (SELF_REPORT)");
+
+const validNonOwnerReport = simulateListingReportSubmission({
+  reporterId: "user_renter_9",
+  targetOwnerId: "user_owner_1",
+  targetListingId: "lst_101",
+  reason: "Suspected duplicate equipment",
+  details: "Same equipment photo appears on another website.",
+});
+assert(validNonOwnerReport.success && validNonOwnerReport.status === "pending", "Non-owner can submit legitimate report against equipment listing");
+
+const duplicateReportAttempt = simulateListingReportSubmission({
+  reporterId: "user_renter_9",
+  targetOwnerId: "user_owner_1",
+  targetListingId: "lst_101",
+  reason: "Suspected duplicate equipment",
+  existingReports: [{ reporter_id: "user_renter_9", listing_id: "lst_101", status: "pending" }],
+});
+assert(!duplicateReportAttempt.success && duplicateReportAttempt.code === "DUPLICATE_REPORT", "Duplicate report from same reporter for same listing is blocked (DUPLICATE_REPORT)");
+
+const emptyReasonReport = simulateListingReportSubmission({
+  reporterId: "user_renter_9",
+  targetOwnerId: "user_owner_1",
+  targetListingId: "lst_101",
+  reason: "   ",
+});
+assert(!emptyReasonReport.success && emptyReasonReport.code === "INVALID_INPUT", "Empty report reason is rejected (INVALID_INPUT)");
+
+const shortReasonReport = simulateListingReportSubmission({
+  reporterId: "user_renter_9",
+  targetOwnerId: "user_owner_1",
+  targetListingId: "lst_101",
+  reason: "bad",
+});
+assert(!shortReasonReport.success && shortReasonReport.code === "INVALID_INPUT", "Short report reason (<5 chars) is rejected (INVALID_INPUT)");
+
+const excessiveDetailsReport = simulateListingReportSubmission({
+  reporterId: "user_renter_9",
+  targetOwnerId: "user_owner_1",
+  targetListingId: "lst_101",
+  reason: "Suspected duplicate equipment",
+  details: "x".repeat(1001),
+});
+assert(!excessiveDetailsReport.success && excessiveDetailsReport.code === "INVALID_INPUT", "Excessive report details (>1000 chars) are rejected (INVALID_INPUT)");
+
+// 21.2: Static Code Invariants for Moderation UI & Policy Handling
+const listingDetailContent = fs.readFileSync(path.join(__dirname, "../app/listings/[id]/page.tsx"), "utf-8");
+assert(listingDetailContent.includes("Your Listing"), "Listing detail page renders 'Your Listing' badge when user is listing owner");
+assert(listingDetailContent.includes("listing.owner_id === userId"), "Listing detail page verifies ownership against authenticated user ID");
+assert(listingDetailContent.includes("targetOwnerId={listing.owner_id}"), "Listing detail page forwards targetOwnerId to ReportButton");
+assert(listingDetailContent.includes("currentUserId={userId || undefined}"), "Listing detail page forwards currentUserId to ReportButton");
+
+const profilePageContent = fs.readFileSync(path.join(__dirname, "../app/profile/[id]/page.tsx"), "utf-8");
+assert(profilePageContent.includes("Your Profile"), "Profile page renders 'Your Profile' badge when user is profile owner");
+assert(profilePageContent.includes("userId === id"), "Profile page checks ownership against authenticated user ID");
+
+const reportButtonContent = fs.readFileSync(path.join(__dirname, "../components/moderation/report-button.tsx"), "utf-8");
+assert(reportButtonContent.includes("targetOwnerId?: string;"), "ReportButton interface accepts targetOwnerId prop");
+assert(reportButtonContent.includes("currentUserId?: string;"), "ReportButton interface accepts currentUserId prop");
+
+const reportModalContent = fs.readFileSync(path.join(__dirname, "../components/moderation/report-modal.tsx"), "utf-8");
+assert(reportModalContent.includes("isSelfReport"), "ReportModal computes isSelfReport flag");
+assert(reportModalContent.includes("disabled={isSubmitting || !reason || isSelfReport}"), "ReportModal disables submit button when user is target owner");
+
+const reportsActionContent = fs.readFileSync(path.join(__dirname, "../app/actions/reports.ts"), "utf-8");
+assert(reportsActionContent.includes("SELF_REPORT"), "submitReportAction validates and returns SELF_REPORT code when reporter is target owner");
+assert(reportsActionContent.includes("DUPLICATE_REPORT"), "submitReportAction checks existing reports and returns DUPLICATE_REPORT");
+assert(reportsActionContent.includes("insertErr.code === \"23505\""), "submitReportAction explicitly handles PostgreSQL unique violation 23505 for listing reports");
+assert(reportsActionContent.includes("prErr.code === \"23505\""), "submitReportAction explicitly handles PostgreSQL unique violation 23505 for profile reports");
+assert(!reportsActionContent.includes("svcReport"), "submitReportAction eliminates double-insert fallback pattern");
+assert(reportsActionContent.includes("Report creation could not be confirmed"), "submitReportAction returns error if inserted id is missing");
+
+// Database migration 015 report invariants
+const migration015ReportsContent = fs.readFileSync(path.join(__dirname, "../supabase/migrations/015_moderation_and_integrity_overhaul.sql"), "utf-8");
+assert(migration015ReportsContent.includes("idx_listing_reports_active_reporter"), "Migration 015 enforces partial unique index on active listing reports");
+assert(migration015ReportsContent.includes("idx_profile_reports_active_reporter"), "Migration 015 enforces partial unique index on active profile reports");
+assert(migration015ReportsContent.includes("Reporters can view own submitted reports"), "Migration 015 enforces reporter-scoped SELECT RLS policy on listing_reports");
+
+// 21.3: Concurrency Simulation for Database-Enforced Unique Reports (23505)
+function simulateReportDbInsert(reportData, existingKeys = new Set()) {
+  const key = `${reportData.listing_id}:${reportData.reporter_id}`;
+  if (existingKeys.has(key)) {
+    return { error: { code: "23505", message: "duplicate key value violates unique constraint idx_listing_reports_active_reporter" } };
+  }
+  existingKeys.add(key);
+  return { data: { id: "rep_" + Math.random().toString(36).substring(2, 9) } };
+}
+
+const initialInsert = simulateReportDbInsert({ listing_id: "lst-101", reporter_id: "user-renter-1" });
+assert(Boolean(initialInsert.data?.id), "Initial report insert succeeds with confirmed generated report id");
+
+const concurrentReportInsert = simulateReportDbInsert({ listing_id: "lst-101", reporter_id: "user-renter-1" }, new Set(["lst-101:user-renter-1"]));
+assert(concurrentReportInsert.error?.code === "23505", "Concurrent duplicate report triggers database unique violation 23505");
+
+// -----------------------------------------------------------------------------
+// 22. DUPLICATE EQUIPMENT LISTINGS & MULTI-LAYER ENFORCEMENT (BUG 2)
+// -----------------------------------------------------------------------------
+console.log("\n▶ SUITE 22: Duplicate Equipment Listings & Multi-Layer Enforcement");
+
+// 22.1: Duplicate Signal Evaluation Simulation matching lib/marketplace/integrity.ts
+function simulateDuplicateSignals(candidate, existing) {
+  const reasons = [];
+  let score = 0;
+  const isSameOwner = candidate.ownerId === existing.ownerId;
+
+  // 1. Canonical Identifier Signal
+  const normCandidateId = normalizeAssetIdentifierTest(candidate.serialOrVin);
+  const normExistingId = normalizeAssetIdentifierTest(existing.assetIdentifier);
+  if (normCandidateId && normExistingId && normCandidateId === normExistingId) {
+    score += 0.85;
+    reasons.push("Identical physical serial number, chassis code, or VIN detected.");
+  }
+
+  // 2. Exact Title & Category Match
+  const candidateTitleLower = candidate.title.trim().toLowerCase();
+  const existingTitleLower = existing.title.trim().toLowerCase();
+  const isSameCategory = candidate.categoryId === existing.categoryId;
+
+  if (isSameCategory) {
+    if (candidateTitleLower === existingTitleLower) {
+      score += isSameOwner ? 0.35 : 0.25;
+      reasons.push("Identical title in the same equipment category.");
+    }
+  }
+
+  // 3. Structured Specs
+  const extAttrs = existing.attributes || {};
+  const candMake = candidate.make || "";
+  const extMake = String(extAttrs.make || "").trim();
+  const candModel = candidate.model || "";
+  const extModel = String(extAttrs.model || "").trim();
+  if (candMake && extMake && candMake.toLowerCase() === extMake.toLowerCase()) {
+    if (candModel && extModel && candModel.toLowerCase() === extModel.toLowerCase()) {
+      score += 0.20;
+      reasons.push("Exact make and model match.");
+    }
+  }
+
+  // 6. Image Match (URL or Content Hash)
+  let hasExactImageMatch = false;
+  if (candidate.images && existing.images) {
+    const candImgs = new Set(candidate.images.filter(Boolean));
+    if (existing.images.some((img) => candImgs.has(img))) {
+      hasExactImageMatch = true;
+    }
+  }
+
+  const candHashes = candidate.imageHashes || [];
+  const extHashes = Array.isArray(extAttrs.image_hashes) ? extAttrs.image_hashes : [];
+  if (candHashes.length > 0 && extHashes.length > 0) {
+    const hashSet = new Set(candHashes);
+    if (extHashes.some((h) => hashSet.has(h))) {
+      hasExactImageMatch = true;
+    }
+  }
+
+  if (hasExactImageMatch) {
+    if (isSameOwner) {
+      const hasSecondaryOverlap =
+        isSameCategory ||
+        candidateTitleLower === existingTitleLower ||
+        (candMake && extMake && candMake.toLowerCase() === extMake.toLowerCase());
+
+      if (hasSecondaryOverlap) {
+        score += 0.85;
+        reasons.push("Identical equipment photo and overlapping equipment attributes uploaded by the same account.");
+      } else {
+        score += 0.60;
+        reasons.push("Identical equipment photo uploaded for distinct equipment attributes by the same account (requires verification).");
+      }
+    } else {
+      score += 0.35;
+      reasons.push("Shared asset photo detected across accounts (potential stock image).");
+    }
+  }
+
+  const normalizedConfidence = Math.min(1.0, Number(score.toFixed(2)));
+  let classification = "UNIQUE";
+  let requiresQuarantine = false;
+
+  if (normalizedConfidence >= 0.85 || (isSameOwner && normalizedConfidence >= 0.70)) {
+    classification = "CONFIRMED_DUPLICATE";
+    requiresQuarantine = !isSameOwner;
+  } else if (normalizedConfidence >= 0.50) {
+    classification = "SUSPECTED_DUPLICATE";
+    requiresQuarantine = true;
+  } else if (normalizedConfidence >= 0.30) {
+    classification = "WEAK_SIMILARITY";
+  }
+
+  return { classification, confidence: normalizedConfidence, reasons, isSameOwner, requiresQuarantine };
+}
+
+// Subtest A: Same owner + identical image hash classifies as CONFIRMED_DUPLICATE (blocked immediately)
+const sameOwnerImageDup = simulateDuplicateSignals(
+  {
+    title: "Excavator",
+    categoryId: "cat_excavators",
+    pricePerDay: 5000,
+    ownerId: "user_contractor_1",
+    imageHashes: ["hash_cartoon_excavator_abc"],
+  },
+  {
+    id: "lst_existing_1",
+    title: "Excavator",
+    categoryId: "cat_excavators",
+    pricePerDay: 5000,
+    ownerId: "user_contractor_1",
+    attributes: { image_hashes: ["hash_cartoon_excavator_abc"] },
+  }
+);
+assert(sameOwnerImageDup.classification === "CONFIRMED_DUPLICATE", "Same owner with identical image hash is classified as CONFIRMED_DUPLICATE");
+assert(sameOwnerImageDup.confidence >= 0.85, "Same owner with identical image hash achieves >= 0.85 confidence score");
+assert(!sameOwnerImageDup.requiresQuarantine, "Same owner duplicate is blocked directly rather than shadow quarantined");
+
+// Subtest B: Dual 'adwa' real-world collision pattern (different price & description, same owner, identical cartoon image)
+const adwaCollision = simulateDuplicateSignals(
+  {
+    title: "adwa",
+    categoryId: "cat_heavy",
+    pricePerDay: 6000,
+    ownerId: "user_adwa_owner",
+    imageHashes: ["hash_adwa_cartoon_999"],
+  },
+  {
+    id: "lst_adwa_original",
+    title: "adwa",
+    categoryId: "cat_heavy",
+    pricePerDay: 5000,
+    ownerId: "user_adwa_owner",
+    attributes: { image_hashes: ["hash_adwa_cartoon_999"] },
+  }
+);
+assert(adwaCollision.classification === "CONFIRMED_DUPLICATE", "Dual 'adwa' collision pattern is detected and classified as CONFIRMED_DUPLICATE");
+
+// Subtest C: Adversarial circumvention attempt: Altered title, altered price, altered description with same image
+const adversarialBypass = simulateDuplicateSignals(
+  {
+    title: "Different Heavy Machinery Model",
+    categoryId: "cat_different",
+    pricePerDay: 12000,
+    ownerId: "user_contractor_1",
+    imageHashes: ["hash_cartoon_excavator_abc"],
+  },
+  {
+    id: "lst_existing_1",
+    title: "Excavator",
+    categoryId: "cat_excavators",
+    pricePerDay: 5000,
+    ownerId: "user_contractor_1",
+    attributes: { image_hashes: ["hash_cartoon_excavator_abc"] },
+  }
+);
+assert(adversarialBypass.classification === "SUSPECTED_DUPLICATE", "Adversarial bypass with distinct category/specs with same photo routes to SUSPECTED_DUPLICATE review quarantine");
+assert(adversarialBypass.requiresQuarantine === true, "Adversarial bypass with distinct category/specs requires review quarantine without immediate penalty");
+
+// Subtest D: Cross-account stock photo protection: Different owner using OEM image receives lower score and is NOT blocked as confirmed fraud
+const stockPhotoDifferentOwner = simulateDuplicateSignals(
+  {
+    title: "Komatsu PC200",
+    categoryId: "cat_excavators",
+    pricePerDay: 8000,
+    ownerId: "user_contractor_B",
+    imageHashes: ["hash_komatsu_catalog_photo"],
+  },
+  {
+    id: "lst_existing_komatsu",
+    title: "Caterpillar 320",
+    categoryId: "cat_excavators",
+    pricePerDay: 7500,
+    ownerId: "user_contractor_A",
+    attributes: { image_hashes: ["hash_komatsu_catalog_photo"] },
+  }
+);
+assert(stockPhotoDifferentOwner.classification !== "CONFIRMED_DUPLICATE", "Cross-account image reuse (stock photo) is NOT classified as CONFIRMED_DUPLICATE");
+assert(stockPhotoDifferentOwner.confidence <= 0.40, "Cross-account stock photo confidence is bounded at 0.35 to prevent false-positive bans");
+
+// Subtest E: Ambiguous same-owner photo reuse with distinct category and specifications triggers quarantine rather than confirmed duplicate
+const ambiguousSameOwnerPhoto = simulateDuplicateSignals(
+  {
+    title: "Generator Inverter",
+    categoryId: "cat_generators",
+    pricePerDay: 2500,
+    ownerId: "user_contractor_1",
+    imageHashes: ["hash_cartoon_excavator_abc"],
+    make: "Honda",
+    model: "EU2200i",
+  },
+  {
+    id: "lst_existing_1",
+    title: "Excavator",
+    categoryId: "cat_excavators",
+    pricePerDay: 5000,
+    ownerId: "user_contractor_1",
+    attributes: { image_hashes: ["hash_cartoon_excavator_abc"], make: "Caterpillar", model: "320" },
+  }
+);
+assert(ambiguousSameOwnerPhoto.classification === "SUSPECTED_DUPLICATE", "Ambiguous same-owner photo reuse with distinct attributes is classified as SUSPECTED_DUPLICATE");
+assert(ambiguousSameOwnerPhoto.requiresQuarantine === true, "Ambiguous same-owner photo reuse routes to review quarantine (shadow_quarantined) without blocking or penalizing user");
+
+// 22.2: Server Storage Ownership & SSRF Prevention Simulation
+function validateStorageMediaOwnership(imgUrl, callerUserId) {
+  const storageMatch = imgUrl.match(/listing-images\/(?:public\/)?([^?#\s]+)/);
+  if (!storageMatch) return { valid: true, isStorage: false };
+  const relativePath = storageMatch[1];
+  if (relativePath.includes("..")) return { valid: false, code: "INVALID_INPUT" };
+  if (!relativePath.startsWith(`${callerUserId}/`)) return { valid: false, code: "UNAUTHORIZED_MEDIA" };
+  return { valid: true, isStorage: true, relativePath };
+}
+
+const validStorageImg = validateStorageMediaOwnership("https://project.supabase.co/storage/v1/object/public/listing-images/user_legit_1/photo.jpg", "user_legit_1");
+assert(validStorageImg.valid && validStorageImg.isStorage, "Valid storage image path belonging to caller is accepted");
+
+const crossUserTheftImg = validateStorageMediaOwnership("https://project.supabase.co/storage/v1/object/public/listing-images/user_victim_99/photo.jpg", "user_attacker_2");
+assert(!crossUserTheftImg.valid && crossUserTheftImg.code === "UNAUTHORIZED_MEDIA", "Storage image path belonging to another user is strictly rejected with UNAUTHORIZED_MEDIA");
+
+const dirTraversalImg = validateStorageMediaOwnership("https://project.supabase.co/storage/v1/object/public/listing-images/user_legit_1/../../../secret.jpg", "user_legit_1");
+assert(!dirTraversalImg.valid && dirTraversalImg.code === "INVALID_INPUT", "Directory traversal in storage path is strictly rejected with INVALID_INPUT");
+
+// 22.3: Static Code Invariants for Duplicate Prevention & Server Authority
+const integrityContent = fs.readFileSync(path.join(__dirname, "../lib/marketplace/integrity.ts"), "utf-8");
+assert(integrityContent.includes("imageHashes?: string[];"), "EquipmentAttributeProfile interface defines imageHashes array");
+assert(integrityContent.includes("export function computeImageContentHash"), "integrity.ts exports computeImageContentHash helper");
+assert(integrityContent.includes("score += 0.85; // High confidence duplicate for same owner"), "integrity.ts assigns 0.85 score to same-owner image matches with secondary overlap");
+assert(integrityContent.includes("score += 0.60;"), "integrity.ts assigns 0.60 score to ambiguous same-owner photo reuse with distinct attributes");
+assert(integrityContent.includes("score += 0.35; // Shared photo across accounts"), "integrity.ts assigns 0.35 score to cross-account stock photo matches");
+
+const newListingFormContent = fs.readFileSync(path.join(__dirname, "../components/marketplace/new-listing-form.tsx"), "utf-8");
+assert(newListingFormContent.includes("crypto.subtle.digest"), "new-listing-form.tsx computes client-side SHA-256 image hashes before upload");
+assert(newListingFormContent.includes("image_hashes"), "new-listing-form.tsx embeds image_hashes in equipment attributes");
+
+const listingsActionContent = fs.readFileSync(path.join(__dirname, "../app/listings/actions.ts"), "utf-8");
+assert(listingsActionContent.includes("ownerCandidates"), "app/listings/actions.ts queries all existing inventory owned by current caller without truncation");
+assert(listingsActionContent.includes("delete cleanAttributes.image_hashes;"), "app/listings/actions.ts strips client-supplied image_hashes to guarantee server authority");
+assert(listingsActionContent.includes("UNAUTHORIZED_MEDIA"), "app/listings/actions.ts validates storage path ownership and rejects cross-user image references");
+assert(listingsActionContent.includes("relativePath.includes(\"..\")"), "app/listings/actions.ts blocks directory traversal in storage paths");
+assert(listingsActionContent.includes("cleanAttributes as unknown as Json"), "app/listings/actions.ts persists server-verified attributes");
+assert(listingsActionContent.includes("23505"), "app/listings/actions.ts handles PostgreSQL unique constraint violation error code 23505 gracefully");
+
+const diagnoseScriptPath = path.join(__dirname, "diagnose-duplicates.cjs");
+assert(fs.existsSync(diagnoseScriptPath), "scripts/diagnose-duplicates.cjs standalone audit script exists");
+const diagnoseContent = fs.readFileSync(diagnoseScriptPath, "utf-8");
+assert(!diagnoseContent.includes("DELETE FROM"), "Diagnostic tool does NOT delete records from database");
+assert(!diagnoseContent.includes("UPDATE "), "Diagnostic tool does NOT mutate records in database");
+
+// -----------------------------------------------------------------------------
+// 23. ADMIN DASHBOARD AUTHORIZATION & ACCESS DENIED UX (BUG 3)
+// -----------------------------------------------------------------------------
+console.log("\n▶ SUITE 23: Admin Dashboard Authorization & Access Denied UX");
+
+// 23.1: Admin Layout Authorization & UX Invariants
+assert(adminLayoutContent.includes("<AdminAccessDenied"), "AdminLayout renders AdminAccessDenied component when user lacks admin privileges");
+assert(!adminLayoutContent.includes('redirect("/")'), "AdminLayout does NOT perform silent redirect to homepage for non-admins");
+assert(adminLayoutContent.includes('redirect("/sign-in?redirect_url=/admin")'), "AdminLayout redirects unauthenticated visitors to sign-in with return URL");
+assert(!adminLayoutContent.includes("gumataychristianpaul@gmail.com"), "AdminLayout contains NO hardcoded email backdoors");
+
+// 23.2: AdminAccessDenied Component Invariants
+const adminAccessDeniedPath = path.join(__dirname, "../components/admin/admin-access-denied.tsx");
+assert(fs.existsSync(adminAccessDeniedPath), "components/admin/admin-access-denied.tsx component exists");
+const adminAccessDeniedContent = fs.readFileSync(adminAccessDeniedPath, "utf-8");
+assert(adminAccessDeniedContent.includes("userEmail"), "AdminAccessDenied component displays user email");
+assert(adminAccessDeniedContent.includes("Return to Marketplace"), "AdminAccessDenied component provides navigation back to marketplace");
+assert(adminAccessDeniedContent.includes("Sign Out"), "AdminAccessDenied component provides Sign Out button");
+assert(adminAccessDeniedContent.includes("Administrative Access Required"), "AdminAccessDenied component provides clear explanatory heading");
+
+// 23.3: Server Action Admin Protection Invariants
+assert(adminActionsContent.includes("verifyAdminCaller"), "app/admin/actions.ts strictly enforces verifyAdminCaller on server actions");
+assert(!adminActionsContent.includes("gumataychristianpaul@gmail.com"), "app/admin/actions.ts contains NO hardcoded email backdoors");
+
 console.log("\n===============================================================================");
 console.log(`SUMMARY: ${passedTests}/${totalTests} Tests Passed (${failedTests} Failed)`);
 console.log("===============================================================================");
@@ -1047,3 +2658,5 @@ if (failedTests > 0) {
 } else {
   process.exit(0);
 }
+
+

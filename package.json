@@ -39,5 +39,11 @@
     "eslint-config-next": "16.3.7",
     "tailwindcss": "^4",
     "typescript": "^5"
+  },
+  "engines": {
+    "node": "20.x || 22.x"
+  },
+  "allowScripts": {
+    "unrs-resolver": true
   }
 }

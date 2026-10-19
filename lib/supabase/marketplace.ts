@@ -1,30 +1,28 @@
 import "server-only";
 
+import { unstable_cache } from "next/cache";
 import { createClient } from "@supabase/supabase-js";
-import { createSupabaseServerClient } from "./server";
+import { createSupabaseServerClient, getSupabaseUrl, getSupabasePublishableKey } from "./server";
 import type { Database, CategoryRow } from "./types";
 import { MARKETPLACE_CATEGORIES } from "@/lib/marketplace/categories";
 import { MOCK_LISTINGS, MOCK_BOOKINGS, type MarketplaceListingItem } from "@/lib/marketplace/mock-listings";
 
 function getPublicClient() {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.VITE_SUPABASE_URL;
-  const key =
-    process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ||
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
-    process.env.VITE_SUPABASE_ANON_KEY;
-  if (!url || !key) return null;
+  const url = getSupabaseUrl();
+  const key = getSupabasePublishableKey();
+  if (!url || !key || url.includes("ubphrityabunayxrhqkj")) return null;
   return createClient<Database>(url, key);
 }
 
-export async function getMarketplaceCategories(): Promise<CategoryRow[]> {
+// [FUNC] + [ASYNC] Fetches category taxonomy records from the database with mock fallback.
+async function fetchCategoriesFromDb(): Promise<CategoryRow[]> {
   try {
+    // [DB] Query all available categories ordered alphabetically.
     const supabase = getPublicClient() || (await createSupabaseServerClient());
     const { data, error } = await supabase
       .from("categories")
       .select("*")
       .order("name", { ascending: true });
-
-    console.log("[select categories]", { count: data?.length, error });
 
     if (!error && data && data.length > 0) {
       return data;
@@ -46,6 +44,23 @@ export async function getMarketplaceCategories(): Promise<CategoryRow[]> {
   }));
 }
 
+// [FUNC] Next.js Data Cache wrapper caching category metadata for 1 hour across all users.
+const getCachedMarketplaceCategoriesInternal = unstable_cache(
+  fetchCategoriesFromDb,
+  ["marketplace-categories"],
+  { revalidate: 3600, tags: ["marketplace-categories"] }
+);
+
+// [FUNC] + [RETURN] Public accessor returning cached categories with automatic fallback.
+export async function getMarketplaceCategories(): Promise<CategoryRow[]> {
+  try {
+    return await getCachedMarketplaceCategoriesInternal();
+  } catch {
+    return fetchCategoriesFromDb();
+  }
+}
+
+// [DECL] + [ARRAY] Rental reservation statuses that hold equipment and block concurrent bookings.
 export const RESERVATION_BLOCKING_STATUSES = [
   "pending",
   "accepted",
@@ -62,31 +77,56 @@ export interface ListingsQueryOptions {
   end?: string;
   min?: string | number;
   max?: string | number;
+  page?: string | number;
+  limit?: string | number;
 }
 
+export interface MarketplaceListingsResult {
+  items: MarketplaceListingItem[];
+  totalCount: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+}
+
+// [FUNC] + [ASYNC] + [PARAM] Authoritative search and browse query function with server-side pagination.
 export async function getMarketplaceListings(
   options: ListingsQueryOptions = {}
-): Promise<MarketplaceListingItem[]> {
+): Promise<MarketplaceListingsResult> {
   const { category, q, start, end, min, max } = options;
+  // [VALIDATION] + [DECL] Clamp pagination inputs to ensure page >= 1 and 1 <= pageSize <= 100.
+  const page = Math.max(1, Number(options.page) || 1);
+  const pageSize = Math.min(100, Math.max(1, Number(options.limit) || 24));
+  // [INIT] Compute SQL offset for Postgres range pagination.
+  const offset = (page - 1) * pageSize;
 
   try {
     const supabase = getPublicClient() || (await createSupabaseServerClient());
 
     // 1. Identify category ID if category slug provided
+    // Optimization: Resolve category ID from cached categories instead of an unneeded extra DB round-trip
     let categoryId: string | null = null;
     if (category && category !== "all") {
-      const { data: catData } = await supabase
-        .from("categories")
-        .select("id")
-        .eq("slug", category)
-        .maybeSingle();
+      const allCategories = await getMarketplaceCategories();
+      const matchedCategory = allCategories.find((c) => c.slug === category);
+      if (matchedCategory) {
+        categoryId = matchedCategory.id;
+      } else {
+        // Fallback: direct DB query if category was newly created and cache has not revalidated
+        const { data: catData } = await supabase
+          .from("categories")
+          .select("id")
+          .eq("slug", category)
+          .maybeSingle();
 
-      if (catData) {
-        categoryId = catData.id;
+        if (catData) {
+          categoryId = catData.id;
+        }
       }
     }
 
     // 2. Identify booked listings in the requested date range
+    // [DECL] Array holding IDs of listings already reserved in the desired date window.
     let bookedListingIds: string[] = [];
     if (start || end) {
       let bookingsQuery = supabase
@@ -94,6 +134,7 @@ export async function getMarketplaceListings(
         .select("listing_id")
         .in("status", [...RESERVATION_BLOCKING_STATUSES]);
 
+      // [DB] Filter for overlapping reservations.
       if (start && end) {
         bookingsQuery = bookingsQuery.lte("start_date", end).gte("end_date", start);
       } else if (start) {
@@ -108,14 +149,17 @@ export async function getMarketplaceListings(
       }
     }
 
-    // 3. Query listings with relations (including available and newly submitted pending_review)
+    // 3. Query listings with relations and exact server-side count
     let query = supabase
       .from("listings")
-      .select(`
+      .select(
+        `
         *,
         category:categories(*),
         listing_images(*)
-      `)
+      `,
+        { count: "exact" }
+      )
       .in("status", ["available", "pending_review"]);
 
     if (categoryId) {
@@ -145,12 +189,15 @@ export async function getMarketplaceListings(
       query = query.not("id", "in", `(${bookedListingIds.join(",")})`);
     }
 
-    const { data, error } = await query.order("created_at", { ascending: false });
-
-    console.log("[select listings]", { count: data?.length, error });
+    const { data, count, error } = await query
+      .order("created_at", { ascending: false })
+      .range(offset, offset + pageSize - 1);
 
     if (!error && data) {
+      const totalCount = count !== null && count !== undefined ? count : data.length;
+      const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
       let results = data as unknown as MarketplaceListingItem[];
+
       if (results.length > 0) {
         const listingIds = results.map((l) => l.id);
         const { data: activeBookings } = await supabase
@@ -169,11 +216,19 @@ export async function getMarketplaceListings(
       }
 
       // Security: Strip sensitive asset_identifier (VIN, serial number) from public marketplace listing items
-      return results.map((item) => {
+      const safeItems = results.map((item) => {
         const safeItem = { ...item };
         delete (safeItem as Record<string, unknown>).asset_identifier;
         return safeItem as MarketplaceListingItem;
       });
+
+      return {
+        items: safeItems,
+        totalCount,
+        page,
+        pageSize,
+        totalPages,
+      };
     }
   } catch (err) {
     console.error("[supabase/marketplace] Error fetching listings:", err);
@@ -237,7 +292,7 @@ export async function getMarketplaceListingById(
   return fallback || null;
 }
 
-function filterMockListings(options: ListingsQueryOptions): MarketplaceListingItem[] {
+function filterMockListings(options: ListingsQueryOptions): MarketplaceListingsResult {
   let results = [...MOCK_LISTINGS];
 
   if (options.category && options.category !== "all") {
@@ -268,7 +323,20 @@ function filterMockListings(options: ListingsQueryOptions): MarketplaceListingIt
     }
   }
 
-  return results;
+  const totalCount = results.length;
+  const page = Math.max(1, Number(options.page) || 1);
+  const pageSize = Math.min(100, Math.max(1, Number(options.limit) || 24));
+  const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
+  const offset = (page - 1) * pageSize;
+  const items = results.slice(offset, offset + pageSize);
+
+  return {
+    items,
+    totalCount,
+    page,
+    pageSize,
+    totalPages,
+  };
 }
 
 export interface ListingBookedRange {
@@ -327,6 +395,8 @@ export interface DashboardBookingItem {
   created_at: string;
   listing?: MarketplaceListingItem | null;
   is_reviewed?: boolean;
+  renter_name?: string | null;
+  lister_name?: string | null;
 }
 
 export async function getUserRentals(userId: string): Promise<DashboardBookingItem[]> {
@@ -346,7 +416,33 @@ export async function getUserRentals(userId: string): Promise<DashboardBookingIt
       .order("created_at", { ascending: false });
 
     if (!error && data) {
-      // Check which completed/returned bookings have already been reviewed
+      // 1. Resolve host/lister names for renter dashboard cards & review modal
+      const ownerIds = Array.from(
+        new Set(
+          data
+            .map((b) => (b.listing as unknown as { owner_id?: string } | null)?.owner_id)
+            .filter((id): id is string => Boolean(id))
+        )
+      );
+
+      const ownerNameMap = new Map<string, string>();
+      if (ownerIds.length > 0) {
+        const { data: ownerProfiles } = await supabase
+          .from("profiles")
+          .select("clerk_user_id, first_name, last_name")
+          .in("clerk_user_id", ownerIds);
+
+        if (ownerProfiles) {
+          for (const p of ownerProfiles) {
+            const name = [p.first_name, p.last_name].filter(Boolean).join(" ").trim();
+            if (name) {
+              ownerNameMap.set(p.clerk_user_id, name);
+            }
+          }
+        }
+      }
+
+      // 2. Check which completed/returned bookings have already been reviewed
       const completedBookingIds = data
         .filter((b) => b.status === "completed" || b.status === "returned")
         .map((b) => b.id);
@@ -366,10 +462,15 @@ export async function getUserRentals(userId: string): Promise<DashboardBookingIt
         }
       }
 
-      return data.map((b) => ({
-        ...(b as unknown as DashboardBookingItem),
-        is_reviewed: reviewedSet.has(b.id),
-      }));
+      return data.map((b) => {
+        const ownerId = (b.listing as unknown as { owner_id?: string } | null)?.owner_id;
+        const listerName = ownerId ? ownerNameMap.get(ownerId) || null : null;
+        return {
+          ...(b as unknown as DashboardBookingItem),
+          is_reviewed: reviewedSet.has(b.id),
+          lister_name: listerName,
+        };
+      });
     }
     if (error) {
       console.warn("[supabase] Error fetching user rentals:", error.message);
@@ -393,7 +494,7 @@ export async function getUserListingsAndIncoming(userId: string): Promise<{
   try {
     const supabase = await createSupabaseServerClient();
 
-    // 1. Fetch user's listings (excluding soft-deleted)
+    // 1. Fetch user's listings (excluding soft-deleted and archived listings)
     const { data: listData, error: listError } = await supabase
       .from("listings")
       .select(`
@@ -402,7 +503,7 @@ export async function getUserListingsAndIncoming(userId: string): Promise<{
         listing_images(*)
       `)
       .eq("owner_id", userId)
-      .neq("status", "deleted")
+      .not("status", "in", '("deleted","archived")')
       .order("created_at", { ascending: false });
 
     if (!listError && listData) {
@@ -429,12 +530,41 @@ export async function getUserListingsAndIncoming(userId: string): Promise<{
 
       if (!bkError && bkData) {
         const allBookings = bkData as unknown as DashboardBookingItem[];
+
+        // 3. Resolve readable renter names from profiles (prevent raw Clerk user IDs in UI)
+        const renterIds = Array.from(
+          new Set(allBookings.map((b) => b.renter_id).filter(Boolean))
+        );
+        const renterNameMap = new Map<string, string>();
+        if (renterIds.length > 0) {
+          const { data: renterProfiles } = await supabase
+            .from("profiles")
+            .select("clerk_user_id, first_name, last_name")
+            .in("clerk_user_id", renterIds);
+
+          if (renterProfiles) {
+            for (const p of renterProfiles) {
+              const name = [p.first_name, p.last_name].filter(Boolean).join(" ").trim();
+              if (name) {
+                renterNameMap.set(p.clerk_user_id, name);
+              }
+            }
+          }
+        }
+
+        const enrichedBookings: DashboardBookingItem[] = allBookings.map((b) => ({
+          ...b,
+          renter_name:
+            renterNameMap.get(b.renter_id) ||
+            (b.renter_id.startsWith("mock-") ? "Demo Renter" : "Verified Renter"),
+        }));
+
         // Active / pending booking requests (holding or requesting unit)
-        incomingBookings = allBookings.filter((b) =>
+        incomingBookings = enrichedBookings.filter((b) =>
           ["pending", "accepted", "paid", "active"].includes(b.status)
         );
         // Completed rental history records
-        rentalHistory = allBookings.filter((b) =>
+        rentalHistory = enrichedBookings.filter((b) =>
           ["completed", "returned"].includes(b.status)
         );
 

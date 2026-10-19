@@ -50,6 +50,7 @@ export interface AdminUserItem {
 
 export interface AdminReportItem {
   id: string;
+  target_type?: "listing" | "profile";
   listing_id: string;
   listing_title: string;
   reporter_id: string;
@@ -122,11 +123,23 @@ export async function getAdminOverviewStats(): Promise<AdminOverviewStats> {
   try {
     const supabase = await getAdminSupabaseClient();
 
-    // 1. Users / Profiles statistics
-    const { data: profilesData, error: profilesError } = await supabase
-      .from("profiles")
-      .select("id, clerk_user_id, status, updated_at");
+    // Parallelize all 4 independent overview statistics queries in a single round-trip
+    const [
+      { data: profilesData, error: profilesError },
+      { data: listingsData, error: listingsError },
+      { count: reportsCount },
+      { data: bookingsData, error: bookingsError },
+    ] = await Promise.all([
+      supabase.from("profiles").select("id, status, updated_at"),
+      supabase.from("listings").select("id, status, is_reported"),
+      supabase
+        .from("listing_reports")
+        .select("*", { count: "exact", head: true })
+        .eq("status", "pending"),
+      supabase.from("bookings").select("id, renter_id, status"),
+    ]);
 
+    // 1. Process Users / Profiles statistics
     if (!profilesError && profilesData) {
       stats.totalRegisteredUsers = profilesData.length;
       const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
@@ -143,11 +156,7 @@ export async function getAdminOverviewStats(): Promise<AdminOverviewStats> {
       }
     }
 
-    // 2. Listings statistics
-    const { data: listingsData, error: listingsError } = await supabase
-      .from("listings")
-      .select("id, status, is_reported");
-
+    // 2. Process Listings statistics
     if (!listingsError && listingsData) {
       for (const item of listingsData) {
         const s = item.status as keyof typeof stats.listingsByStatus;
@@ -163,21 +172,12 @@ export async function getAdminOverviewStats(): Promise<AdminOverviewStats> {
       }
     }
 
-    // 3. Reports count from listing_reports table
-    const { count: reportsCount } = await supabase
-      .from("listing_reports")
-      .select("*", { count: "exact", head: true })
-      .eq("status", "pending");
-
+    // 3. Process Reports count from listing_reports table
     if (reportsCount !== null && reportsCount !== undefined && reportsCount > 0) {
       stats.totalReportedListings = Math.max(stats.totalReportedListings, reportsCount);
     }
 
-    // 4. Rentals / Bookings statistics
-    const { data: bookingsData, error: bookingsError } = await supabase
-      .from("bookings")
-      .select("id, renter_id, status");
-
+    // 4. Process Rentals / Bookings statistics
     if (!bookingsError && bookingsData) {
       const uniqueRenters = new Set<string>();
 
@@ -293,7 +293,10 @@ export async function getAdminReports(): Promise<AdminReportItem[]> {
   try {
     const supabase = await getAdminSupabaseClient();
 
-    const { data, error } = await supabase
+    const allItems: AdminReportItem[] = [];
+
+    // 1. Fetch listing reports
+    const { data: listReports, error: listError } = await supabase
       .from("listing_reports")
       .select(`
         *,
@@ -301,7 +304,7 @@ export async function getAdminReports(): Promise<AdminReportItem[]> {
       `)
       .order("created_at", { ascending: false });
 
-    if (!error && data) {
+    if (!listError && listReports) {
       type RawReport = {
         id: string;
         listing_id: string;
@@ -314,18 +317,62 @@ export async function getAdminReports(): Promise<AdminReportItem[]> {
         created_at: string;
       };
 
-      return (data as unknown as RawReport[]).map((r) => ({
-        id: r.id,
-        listing_id: r.listing_id,
-        listing_title: r.listing?.title || "Listing Unit",
-        reporter_id: r.reporter_id || "Anonymous",
-        reporter_email: r.reporter_email || null,
-        reason: r.reason,
-        details: r.details || null,
-        status: (r.status as AdminReportItem["status"]) || "pending",
-        created_at: r.created_at,
-      }));
+      for (const r of listReports as unknown as RawReport[]) {
+        allItems.push({
+          id: r.id,
+          target_type: "listing",
+          listing_id: r.listing_id,
+          listing_title: r.listing?.title || "Listing Unit",
+          reporter_id: r.reporter_id || "Anonymous",
+          reporter_email: r.reporter_email || null,
+          reason: r.reason,
+          details: r.details || null,
+          status: (r.status as AdminReportItem["status"]) || "pending",
+          created_at: r.created_at,
+        });
+      }
     }
+
+    // 2. Fetch profile reports
+    try {
+      const { data: profReports, error: profError } = await supabase
+        .from("profile_reports" as unknown as "listing_reports")
+        .select("*")
+        .order("created_at", { ascending: false });
+
+      if (!profError && profReports) {
+        type RawProfileReport = {
+          id: string;
+          target_user_id: string;
+          reporter_id?: string | null;
+          reporter_email?: string | null;
+          reason: string;
+          details?: string | null;
+          status: string;
+          created_at: string;
+        };
+
+        for (const pr of profReports as unknown as RawProfileReport[]) {
+          allItems.push({
+            id: pr.id,
+            target_type: "profile",
+            listing_id: pr.target_user_id || "",
+            listing_title: `User Profile (${(pr.target_user_id || "").slice(0, 8)}...)`,
+            reporter_id: pr.reporter_id || "Anonymous",
+            reporter_email: pr.reporter_email || null,
+            reason: pr.reason,
+            details: pr.details || null,
+            status: (pr.status as AdminReportItem["status"]) || "pending",
+            created_at: pr.created_at,
+          });
+        }
+      }
+    } catch {
+      // Non-fatal if profile_reports table not yet populated
+    }
+
+    allItems.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+    return allItems;
   } catch (err) {
     console.error("[getAdminReports] Database query error:", err);
   }

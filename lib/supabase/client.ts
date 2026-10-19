@@ -49,21 +49,23 @@
 import { createClient } from "@supabase/supabase-js";
 import type { Database } from "./types";
 
-const supabaseUrl =
-  process.env.NEXT_PUBLIC_SUPABASE_URL ||
-  process.env.VITE_SUPABASE_URL;
+// [FUNC] Helper function that resolves the Supabase project endpoint from client-accessible environment variables.
+// Returns undefined if not configured, preventing module-evaluation crashes during build.
+export function getSupabaseUrl(): string | undefined {
+  const envUrl =
+    process.env.NEXT_PUBLIC_SUPABASE_URL ||
+    process.env.VITE_SUPABASE_URL;
 
-const supabasePublishableKey =
-  process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ||
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
-  process.env.VITE_SUPABASE_ANON_KEY ||
-  process.env.VITE_SUPABASE_PUBLISHABLE_KEY;
+  return envUrl ? envUrl.trim() : undefined;
+}
 
-if (!supabaseUrl || !supabasePublishableKey) {
-  throw new Error(
-    "Missing required Supabase environment variables: " +
-      "NEXT_PUBLIC_SUPABASE_URL (or VITE_SUPABASE_URL) and " +
-      "NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY / NEXT_PUBLIC_SUPABASE_ANON_KEY (or VITE_SUPABASE_ANON_KEY) must be set."
+// [FUNC] + [RETURN] Resolves the public/anon key from various client-accessible environment variable aliases.
+export function getSupabasePublishableKey(): string | undefined {
+  return (
+    process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ||
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
+    process.env.VITE_SUPABASE_ANON_KEY ||
+    process.env.VITE_SUPABASE_PUBLISHABLE_KEY
   );
 }
 
@@ -82,15 +84,41 @@ if (!supabaseUrl || !supabasePublishableKey) {
  * const supabase = useMemo(() => createSupabaseBrowserClient(getToken), [getToken])
  * ```
  */
+// [FUNC] Browser client factory that attaches Clerk authentication tokens to client-side Supabase requests.
 export function createSupabaseBrowserClient(
   clerkTokenOrGetter: string | (() => Promise<string | null>) | null = null
 ) {
+  const supabaseUrl = getSupabaseUrl();
+  const supabasePublishableKey = getSupabasePublishableKey();
+
+  // [VALIDATION] + [IF] + [ERROR] Ensure required Supabase URL is configured.
+  if (!supabaseUrl) {
+    throw new Error(
+      "Missing required Supabase configuration: NEXT_PUBLIC_SUPABASE_URL must be set in your environment."
+    );
+  }
+
+  // [VALIDATION] + [IF] + [ERROR] Reject obsolete hostname with actionable diagnostic error.
+  if (supabaseUrl.includes("ubphrityabunayxrhqkj")) {
+    throw new Error(
+      "Invalid Supabase URL configured: hostname 'ubphrityabunayxrhqkj' is obsolete. Please update NEXT_PUBLIC_SUPABASE_URL in your deployment settings to your active Supabase project URL."
+    );
+  }
+
+  // [VALIDATION] + [IF] + [ERROR] Ensure publishable key is configured.
+  if (!supabasePublishableKey) {
+    throw new Error(
+      "Missing required Supabase environment variables: " +
+        "NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY / NEXT_PUBLIC_SUPABASE_ANON_KEY must be set."
+    );
+  }
+
   const getAccessToken =
     typeof clerkTokenOrGetter === "function"
       ? clerkTokenOrGetter
       : async () => clerkTokenOrGetter ?? null;
 
-  return createClient<Database>(supabaseUrl!, supabasePublishableKey!, {
+  return createClient<Database>(supabaseUrl, supabasePublishableKey, {
     accessToken: getAccessToken,
     global: {
       headers:

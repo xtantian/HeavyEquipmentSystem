@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
+import { auth } from "@clerk/nextjs/server";
 import { ArrowLeft, MapPin, ShieldCheck } from "lucide-react";
 import { Navbar } from "@/components/landing/navbar";
 import { Footer } from "@/components/landing/footer";
@@ -16,6 +17,7 @@ import {
   getListerRatingSummary,
 } from "@/lib/supabase/lister-reviews";
 import { ListerProfileCard } from "@/components/reviews/lister-profile-card";
+import { ReportButton } from "@/components/moderation/report-button";
 
 interface ListingDetailPageProps {
   params: Promise<{ id: string }>;
@@ -23,7 +25,8 @@ interface ListingDetailPageProps {
 
 export default async function ListingDetailPage({ params }: ListingDetailPageProps) {
   const { id } = await params;
-  const [listing, bookedRanges] = await Promise.all([
+  const [{ userId }, listing, bookedRanges] = await Promise.all([
+    auth(),
     getMarketplaceListingById(id),
     getBookedRangesForListing(id),
   ]);
@@ -86,6 +89,23 @@ export default async function ListingDetailPage({ params }: ListingDetailPagePro
               <Badge className="bg-emerald-600 text-white text-xs">
                 Verified Listing
               </Badge>
+              {userId && listing.owner_id === userId ? (
+                <Badge variant="secondary" className="h-6 text-xs bg-primary/10 text-primary border-primary/20 font-medium">
+                  Your Listing
+                </Badge>
+              ) : (
+                <ReportButton
+                  targetType="listing"
+                  targetId={listing.id}
+                  targetTitle={listing.title}
+                  targetOwnerId={listing.owner_id}
+                  currentUserId={userId || undefined}
+                  variant="outline"
+                  size="sm"
+                  label="Report"
+                  className="h-6 text-xs text-muted-foreground hover:text-destructive hover:border-destructive/40"
+                />
+              )}
             </div>
           </div>
 

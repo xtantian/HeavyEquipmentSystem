@@ -1,5 +1,6 @@
 "use client";
 
+// [IMPORT] React core hooks, date manipulation library, and icons for the interactive booking card.
 import * as React from "react";
 import Link from "next/link";
 import {
@@ -33,12 +34,14 @@ import {
 } from "@/lib/utils";
 import { createBookingAction } from "@/app/listings/[id]/actions";
 
+// [TYPE] Interface representing an existing reserved date range fetched from Supabase.
 interface BookedRangeItem {
   start_date: string;
   end_date: string;
   status: string;
 }
 
+// [TYPE] + [PROPS] Interface defining the properties passed from the parent server page to this client component.
 interface RequestToBookCardProps {
   listingId: string;
   listingTitle: string;
@@ -49,6 +52,7 @@ interface RequestToBookCardProps {
   listingStatus?: string;
 }
 
+// [FUNC] + [PROPS] Interactive React Client Component rendering the rental booking calendar and price summary.
 export function RequestToBookCard({
   listingId,
   listingTitle,
@@ -57,9 +61,11 @@ export function RequestToBookCard({
   bookedRanges = [],
   listingStatus = "available",
 }: RequestToBookCardProps) {
+  // [METHOD] Memoize current date to prevent unnecessary recalculation on component re-renders.
   const today = React.useMemo(() => startOfToday(), []);
 
   // Find the first available start date (default tomorrow, or next non-booked day)
+  // [METHOD] Compute initial default start date by skipping already-reserved dates.
   const defaultStart = React.useMemo(() => {
     let candidate = addDays(today, 1);
     const isBooked = (d: Date) =>
@@ -69,6 +75,7 @@ export function RequestToBookCard({
         return isWithinInterval(d, { start: s, end: e });
       });
 
+    // [LOOP] Advance candidate day forward until an unbooked calendar day is found.
     while (isBooked(candidate)) {
       candidate = addDays(candidate, 1);
     }
@@ -77,15 +84,32 @@ export function RequestToBookCard({
 
   const defaultEnd = React.useMemo(() => addDays(defaultStart, 3), [defaultStart]);
 
+  // [STATE] Selected rental start date in state.
   const [startDate, setStartDate] = React.useState<Date | undefined>(defaultStart);
+  // [STATE] Selected rental end date in state.
   const [endDate, setEndDate] = React.useState<Date | undefined>(defaultEnd);
+  // [STATE] Controls visibility of the start date picker popover.
   const [startOpen, setStartOpen] = React.useState(false);
+  // [STATE] Controls visibility of the end date picker popover.
   const [endOpen, setEndOpen] = React.useState(false);
 
+  // [STATE] Boolean tracking asynchronous server submission in progress (disables button & shows spinner).
   const [isSubmitting, setIsSubmitting] = React.useState(false);
+  // [STATE] Holds error message returned by server or input validation.
   const [serverError, setServerError] = React.useState<string | null>(null);
   const [errorCode, setErrorCode] = React.useState<string | null>(null);
+  // [STATE] Stores generated booking ID upon successful submission to display confirmation screen.
   const [bookedConfirmationId, setBookedConfirmationId] = React.useState<string | null>(null);
+
+  // Separate mock/demo listings from real UUID database listings
+  const isDemoListing = React.useMemo(() => {
+    if (!listingId) return false;
+    return (
+      listingId.startsWith("lst-") ||
+      listingId.startsWith("mock-") ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(listingId)
+    );
+  }, [listingId]);
 
   // Helper to determine if a specific date is disabled in calendar
   const isDateDisabled = React.useCallback(
@@ -157,25 +181,39 @@ export function RequestToBookCard({
     setEndOpen(false);
   };
 
+  // [EVENT] + [ASYNC] + [PARAM] Form submit event handler triggering the reservation submission.
   const handleRequestToBook = async (e: React.FormEvent) => {
+    // [METHOD] Prevent default HTML page reload behavior so React state remains intact.
     e.preventDefault();
     setServerError(null);
     setErrorCode(null);
 
+    // [IF] Check if this item is just demo mock data.
+    if (isDemoListing) {
+      setServerError("This is a demonstration listing and cannot accept rental bookings. Please select an active marketplace listing.");
+      setErrorCode("DEMO_LISTING");
+      return;
+    }
+
+    // [VALIDATION] + [IF] Ensure both start and end date states have selected values.
     if (!startDate || !endDate) {
       setServerError("Please select both a start date and an end date.");
       return;
     }
 
+    // [VALIDATION] + [IF] Block submission client-side if selected dates intersect an existing booking.
     if (hasRangeConflict) {
       setServerError("Selected date range conflicts with an existing reservation. Please select different dates.");
       setErrorCode("OVERLAP");
       return;
     }
 
+    // [STATE] Activate loading spinner and disable the submission button.
     setIsSubmitting(true);
 
+    // [ERROR] Catch network errors during Server Action dispatch.
     try {
+      // [FUNC] + [ASYNC] + [OBJ] Call the server action directly over Next.js RPC protocol.
       const result = await createBookingAction({
         listingId,
         startDate: format(startDate, "yyyy-MM-dd"),
@@ -183,16 +221,19 @@ export function RequestToBookCard({
         totalPrice: livePrice,
       });
 
+      // [IF] Update state based on structured server response.
       if (result.error) {
         setServerError(result.error);
         setErrorCode(result.code || "ERROR");
       } else if (result.success && result.bookingId) {
+        // [STATE] Store booking confirmation ID to switch view to success state.
         setBookedConfirmationId(result.bookingId);
       }
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : "Failed to submit booking request.";
       setServerError(message);
     } finally {
+      // [STATE] Reset submitting state once the asynchronous operation finishes.
       setIsSubmitting(false);
     }
   };
@@ -279,6 +320,13 @@ export function RequestToBookCard({
       ) : (
         /* Booking Form */
         <form onSubmit={handleRequestToBook} className="mt-5 space-y-4">
+          {isDemoListing && (
+            <div className="rounded-xl border border-sky-500/30 bg-sky-500/10 p-3 text-xs text-sky-700 dark:text-sky-300 flex items-center gap-2">
+              <AlertCircle className="h-4 w-4 shrink-0" />
+              <span>This is a demonstration listing for preview purposes and cannot accept rental bookings.</span>
+            </div>
+          )}
+
           {listingStatus !== "available" && (
             <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-700 dark:text-amber-300 flex items-center gap-2">
               <AlertCircle className="h-4 w-4 shrink-0" />
@@ -428,7 +476,8 @@ export function RequestToBookCard({
               isSubmitting ||
               hasRangeConflict ||
               durationDays === 0 ||
-              listingStatus !== "available"
+              listingStatus !== "available" ||
+              isDemoListing
             }
             className="w-full font-bold shadow-lg shadow-primary/20 h-12 text-base mt-2 cursor-pointer"
           >
@@ -437,6 +486,8 @@ export function RequestToBookCard({
                 <Loader2 className="mr-2 h-4 w-4 animate-spin" />
                 Submitting Request...
               </>
+            ) : isDemoListing ? (
+              "Demo Listing (Booking Unavailable)"
             ) : listingStatus !== "available" ? (
               "Not Available for Rent"
             ) : (

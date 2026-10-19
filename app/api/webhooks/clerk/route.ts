@@ -84,33 +84,49 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           (e) => e.id === user.primary_email_address_id
         )?.email_address ?? null;
 
-      // Check if user was securely invited as an administrator
-      const publicMeta = (user.public_metadata || {}) as Record<string, unknown>;
+      // Security: ONLY grant admin role if there is a verified, pending invitation in admin_invitations
       let assignedRole: "admin" | "customer" = "customer";
 
-      if (publicMeta.invitedAsAdmin === true || publicMeta.role === "admin") {
-        if (primaryEmail) {
-          const { data: inviteRecord } = await supabase
-            .from("admin_invitations")
-            .select("id, status")
-            .ilike("email", primaryEmail)
-            .eq("status", "pending")
-            .maybeSingle();
+      if (primaryEmail) {
+        const normalizedEmail = primaryEmail.trim().toLowerCase();
+        const { data: inviteRecord, error: inviteErr } = await supabase
+          .from("admin_invitations")
+          .select("id, status, email")
+          .ilike("email", normalizedEmail)
+          .eq("status", "pending")
+          .maybeSingle();
 
-          if (inviteRecord || publicMeta.invitedAsAdmin === true) {
-            assignedRole = "admin";
-            if (inviteRecord) {
-              await supabase
-                .from("admin_invitations")
-                .update({
-                  status: "accepted",
-                  accepted_at: new Date().toISOString(),
-                })
-                .eq("id", inviteRecord.id);
-            }
-          }
-        } else if (publicMeta.invitedAsAdmin === true) {
+        if (inviteErr) {
+          console.error("[webhook/clerk] Error checking admin_invitations:", inviteErr.message);
+        }
+
+        // ONLY assign admin if a server-verified pending invitation exists for this exact email
+        if (inviteRecord && inviteRecord.status === "pending") {
           assignedRole = "admin";
+
+          const { error: updateErr } = await supabase
+            .from("admin_invitations")
+            .update({
+              status: "accepted",
+              accepted_at: new Date().toISOString(),
+            })
+            .eq("id", inviteRecord.id);
+
+          if (updateErr) {
+            console.error(
+              `[webhook/clerk] Failed to update invitation ${inviteRecord.id} status to accepted:`,
+              updateErr.message
+            );
+          }
+        } else {
+          // Log security warning if client/metadata claimed admin without valid server invitation
+          const publicMeta = (user.public_metadata || {}) as Record<string, unknown>;
+          if (publicMeta.invitedAsAdmin === true || publicMeta.role === "admin") {
+            console.warn(
+              "[webhook/clerk] Security: Unauthorized admin role attempt blocked (no pending invitation found):",
+              { clerkUserId: user.id, email: normalizedEmail }
+            );
+          }
         }
       }
 

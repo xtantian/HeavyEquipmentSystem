@@ -1,6 +1,6 @@
 "use server";
 
-import { auth, currentUser, clerkClient } from "@clerk/nextjs/server";
+import { auth, clerkClient } from "@clerk/nextjs/server";
 import { revalidatePath } from "next/cache";
 import { createSupabaseServiceClient, createSupabaseServerClient } from "@/lib/supabase/server";
 import type { ListingStatus, UserAccountStatus, Json } from "@/lib/supabase/types";
@@ -19,33 +19,48 @@ async function getAdminActionClient() {
 
 /**
  * Verifies that the caller is authenticated and holds administrator privileges.
- * Checks both Clerk publicMetadata and Supabase profiles table.
+ * Checks both Clerk publicMetadata and Supabase profiles table, and enforces active account status.
  */
 async function verifyAdminCaller() {
-  const { userId } = await auth();
+  const { userId, sessionClaims } = await auth();
   if (!userId) {
     throw new Error("Unauthorized: Authentication required");
   }
 
-  const user = await currentUser();
-  const isAdminInClerk = user?.publicMetadata?.role === "admin";
+  // Use authenticated server client to inspect profile within caller's own permissions
+  const supabase = await createSupabaseServerClient();
+  const { data: profile, error } = await supabase
+    .from("profiles")
+    .select("email, role, status")
+    .eq("clerk_user_id", userId)
+    .maybeSingle();
 
-  if (!isAdminInClerk) {
-    const supabase = await getAdminActionClient();
-    const { data: profile } = await supabase
-      .from("profiles")
-      .select("role")
-      .eq("clerk_user_id", userId)
-      .maybeSingle();
-
-    if (profile?.role !== "admin") {
-      throw new Error("Unauthorized: Administrator privileges required");
-    }
+  if (error) {
+    console.warn("[verifyAdminCaller] Profile lookup notice:", error.message);
   }
+
+  // Active status check: Inactive, banned, restricted, or deleted accounts CANNOT exercise admin privileges
+  if (profile?.status && profile.status !== "active") {
+    throw new Error(`Unauthorized: Administrator account is ${profile.status}`);
+  }
+
+  const publicMeta = sessionClaims?.publicMetadata as Record<string, unknown> | undefined;
+  const customMeta = sessionClaims?.metadata as Record<string, unknown> | undefined;
+  const isAdminInClerk = publicMeta?.role === "admin" || customMeta?.role === "admin";
+  const isAdminInProfile = profile?.role === "admin";
+
+  if (!isAdminInClerk && !isAdminInProfile) {
+    throw new Error("Unauthorized: Administrator privileges required");
+  }
+
+  const primaryEmail =
+    profile?.email ||
+    (sessionClaims?.email as string) ||
+    null;
 
   return {
     adminId: userId,
-    adminEmail: user?.primaryEmailAddress?.emailAddress || null,
+    adminEmail: primaryEmail,
   };
 }
 
@@ -326,13 +341,18 @@ export async function checkCallerAccountStatus(): Promise<{
   }
 
   try {
-    const supabase = await getAdminActionClient();
+    const supabase = await createSupabaseServerClient();
 
-    const { data: profile } = await supabase
+    const { data: profile, error } = await supabase
       .from("profiles")
       .select("status")
       .eq("clerk_user_id", userId)
       .maybeSingle();
+
+    if (error) {
+      console.warn("[checkCallerAccountStatus] Profile query error:", error.message);
+      return { allowed: false, status: "restricted", reason: "Unable to verify account status." };
+    }
 
     const status = (profile?.status as UserAccountStatus) || "active";
 
@@ -340,15 +360,16 @@ export async function checkCallerAccountStatus(): Promise<{
       return { allowed: false, status, reason: "Your account has been banned due to policy violations." };
     }
     if (status === "restricted") {
-      return { allowed: false, status, reason: "Your account is currently restricted from creating listings or rentals." };
+      return { allowed: false, status, reason: "Your account is currently restricted." };
     }
     if (status === "deleted") {
       return { allowed: false, status, reason: "This account has been deleted." };
     }
 
     return { allowed: true, status: "active" };
-  } catch {
-    return { allowed: true, status: "active" };
+  } catch (err) {
+    console.error("[checkCallerAccountStatus] Verification exception:", err);
+    return { allowed: false, status: "restricted", reason: "Unable to verify account status." };
   }
 }
 
@@ -440,15 +461,22 @@ export async function inviteAdminAction(email: string): Promise<{
     });
 
     // 6. Record tracked invitation in Supabase
-    try {
-      await supabase.from("admin_invitations").insert({
-        clerk_invitation_id: invitation.id,
-        email: normalizedEmail,
-        invited_by: adminId,
-        status: "pending",
-      });
-    } catch (dbErr) {
-      console.warn("[inviteAdminAction] Database tracking warning:", dbErr);
+    const { error: dbErr } = await supabase.from("admin_invitations").insert({
+      clerk_invitation_id: invitation.id,
+      email: normalizedEmail,
+      invited_by: adminId,
+      status: "pending",
+    });
+
+    if (dbErr) {
+      console.error("[inviteAdminAction] Database tracking failed:", dbErr.message);
+      // Clean up Clerk invitation so unrecorded invites cannot be accepted without database tracking
+      try {
+        await client.invitations.revokeInvitation(invitation.id);
+      } catch (cleanupErr) {
+        console.warn("[inviteAdminAction] Failed to cleanup Clerk invitation after DB failure:", cleanupErr);
+      }
+      return { error: `Failed to record administrator invitation: ${dbErr.message}` };
     }
 
     // 7. Record administrative audit trail
@@ -540,13 +568,18 @@ export async function revokeAdminInvitationAction(invitationId: string): Promise
 
     // 2. Update status in database
     const supabase = await getAdminActionClient();
-    await supabase
+    const { error: updateErr } = await supabase
       .from("admin_invitations")
       .update({
         status: "revoked",
         revoked_at: new Date().toISOString(),
       })
       .or(`clerk_invitation_id.eq.${invitationId},id.eq.${invitationId}`);
+
+    if (updateErr) {
+      console.error("[revokeAdminInvitationAction] Database update error:", updateErr.message);
+      return { success: false, error: `Failed to update invitation status in database: ${updateErr.message}` };
+    }
 
     // 3. Record audit log
     await recordAdminAudit(adminId, adminEmail, "admin_invitation_revoked", "invitation", invitationId, {});
