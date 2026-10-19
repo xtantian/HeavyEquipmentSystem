@@ -44,27 +44,41 @@
  * }
  */
 
+// [IMPORT] 'server-only' is a Next.js security guard ensuring this file is never bundled into client browsers.
 import "server-only";
 
+// [IMPORT] Import Supabase JavaScript SDK, Clerk server auth helper, and generated TypeScript database schema.
 import { createClient } from "@supabase/supabase-js";
 import { auth } from "@clerk/nextjs/server";
 import type { Database } from "./types";
 
-const supabaseUrl =
-  process.env.NEXT_PUBLIC_SUPABASE_URL ||
-  process.env.VITE_SUPABASE_URL;
+// [FUNC] Helper function that resolves the Supabase project endpoint from environment variables.
+// Returns undefined if not configured, preventing module-evaluation crashes during build.
+export function getSupabaseUrl(): string | undefined {
+  const envUrl =
+    process.env.NEXT_PUBLIC_SUPABASE_URL ||
+    process.env.SUPABASE_URL ||
+    process.env.VITE_SUPABASE_URL;
 
-const supabasePublishableKey =
-  process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ||
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
-  process.env.VITE_SUPABASE_ANON_KEY ||
-  process.env.VITE_SUPABASE_PUBLISHABLE_KEY;
+  return envUrl ? envUrl.trim() : undefined;
+}
 
-if (!supabaseUrl || !supabasePublishableKey) {
-  throw new Error(
-    "Missing required Supabase environment variables: " +
-      "NEXT_PUBLIC_SUPABASE_URL (or VITE_SUPABASE_URL) and " +
-      "NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY / NEXT_PUBLIC_SUPABASE_ANON_KEY (or VITE_SUPABASE_ANON_KEY) must be set."
+// [FUNC] + [RETURN] Resolves the public/anon key from various supported environment variable aliases.
+export function getSupabasePublishableKey(): string | undefined {
+  return (
+    process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ||
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
+    process.env.SUPABASE_ANON_KEY ||
+    process.env.VITE_SUPABASE_ANON_KEY ||
+    process.env.VITE_SUPABASE_PUBLISHABLE_KEY
+  );
+}
+
+// [FUNC] + [RETURN] Resolves the private service-role key used strictly for privileged server tasks.
+export function getSupabaseServiceKey(): string | undefined {
+  return (
+    process.env.SUPABASE_KEY_SECRET ||
+    process.env.SUPABASE_SERVICE_ROLE_KEY
   );
 }
 
@@ -82,10 +96,37 @@ if (!supabaseUrl || !supabasePublishableKey) {
  * const { data } = await supabase.from("profiles").select("*").single()
  * ```
  */
+// [FUNC] + [ASYNC] Factory function producing an RLS-scoped Supabase client for user requests.
 export async function createSupabaseServerClient() {
-  // auth() is async in Clerk Core 3 (Next.js App Router).
+  const supabaseUrl = getSupabaseUrl();
+  const supabasePublishableKey = getSupabasePublishableKey();
+
+  // [VALIDATION] + [IF] + [ERROR] Ensure required Supabase URL is present at runtime.
+  if (!supabaseUrl) {
+    throw new Error(
+      "Missing required Supabase configuration: NEXT_PUBLIC_SUPABASE_URL (or SUPABASE_URL) must be set in your environment."
+    );
+  }
+
+  // [VALIDATION] + [IF] + [ERROR] Reject obsolete hostname with actionable diagnostic error.
+  if (supabaseUrl.includes("ubphrityabunayxrhqkj")) {
+    throw new Error(
+      "Invalid Supabase URL configured: hostname 'ubphrityabunayxrhqkj' is obsolete. Please update NEXT_PUBLIC_SUPABASE_URL in your deployment settings to your active Supabase project URL."
+    );
+  }
+
+  // [VALIDATION] + [IF] + [ERROR] Ensure the publishable key is present at runtime before executing queries.
+  if (!supabasePublishableKey) {
+    throw new Error(
+      "Missing required Supabase publishable key: " +
+        "NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY / NEXT_PUBLIC_SUPABASE_ANON_KEY must be set."
+    );
+  }
+
+  // [AUTH] + [ASYNC] auth() is async in Clerk Core 3 (Next.js App Router).
   const { getToken } = await auth();
 
+  // [FUNC] Dynamic token getter passed to Supabase to automatically refresh JWTs.
   const getAccessToken = async () => {
     try {
       return await getToken();
@@ -97,7 +138,8 @@ export async function createSupabaseServerClient() {
   // Pre-resolve token for explicit header fallback
   const token = await getAccessToken();
 
-  return createClient<Database>(supabaseUrl!, supabasePublishableKey!, {
+  // [DB] + [RETURN] Instantiate and return the typed Supabase client with Bearer token authentication.
+  return createClient<Database>(supabaseUrl, supabasePublishableKey, {
     accessToken: getAccessToken,
     global: {
       headers: token ? { Authorization: `Bearer ${token}` } : {},
@@ -120,7 +162,7 @@ export async function createSupabaseServerClient() {
  * client to browser code. The SUPABASE_KEY_SECRET env var must never be
  * prefixed with NEXT_PUBLIC_.
  *
- * @throws If SUPABASE_KEY_SECRET is not set.
+ * @throws If SUPABASE_KEY_SECRET or SUPABASE_SERVICE_ROLE_KEY is not set.
  *
  * @example
  * ```ts
@@ -128,9 +170,27 @@ export async function createSupabaseServerClient() {
  * await supabase.from("profiles").upsert({ clerk_user_id: "user_xxx", … })
  * ```
  */
+// [FUNC] Factory creating an administrative client that bypasses Row Level Security (RLS).
+// Used exclusively in webhooks (e.g. Clerk user sync) and background administration tasks.
 export function createSupabaseServiceClient() {
-  const supabaseServiceKey = process.env.SUPABASE_KEY_SECRET;
+  const supabaseUrl = getSupabaseUrl();
+  const supabaseServiceKey = getSupabaseServiceKey();
 
+  // [VALIDATION] + [IF] + [ERROR] Ensure required Supabase URL is present at runtime.
+  if (!supabaseUrl) {
+    throw new Error(
+      "Missing required Supabase configuration: NEXT_PUBLIC_SUPABASE_URL (or SUPABASE_URL) must be set in your environment."
+    );
+  }
+
+  // [VALIDATION] + [IF] + [ERROR] Reject obsolete hostname with actionable diagnostic error.
+  if (supabaseUrl.includes("ubphrityabunayxrhqkj")) {
+    throw new Error(
+      "Invalid Supabase URL configured: hostname 'ubphrityabunayxrhqkj' is obsolete. Please update NEXT_PUBLIC_SUPABASE_URL in your deployment settings to your active Supabase project URL."
+    );
+  }
+
+  // [VALIDATION] + [IF] + [ERROR] Strictly throw if the secret key is missing; never run elevated jobs unauthenticated.
   if (!supabaseServiceKey) {
     throw new Error(
       "SUPABASE_KEY_SECRET is not set. The service-role Supabase client is unavailable. " +
@@ -138,7 +198,8 @@ export function createSupabaseServiceClient() {
     );
   }
 
-  return createClient<Database>(supabaseUrl!, supabaseServiceKey, {
+  // [DB] + [RETURN] Return the elevated administrative Supabase client instance.
+  return createClient<Database>(supabaseUrl, supabaseServiceKey, {
     auth: {
       // Service client is stateless; never manages sessions.
       persistSession: false,

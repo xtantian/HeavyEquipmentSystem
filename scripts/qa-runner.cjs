@@ -2102,16 +2102,60 @@ assert(
   "Migration 015 enforces 64-bit advisory transaction lock via hashtextextended"
 );
 assert(
-  migration015Content.includes("SET search_path = public, pg_catalog"),
-  "Migration 015 sets explicit and safe search path on strike trigger function"
-);
-assert(
   migration015Content.includes("idx_duplicate_enforcements_user_created"),
   "Migration 015 includes composite index for duplicate enforcement audit trail"
 );
 assert(
   !migration015Content.includes("pg_trigger_depth() > 1"),
   "Migration 015 does not contain vulnerable pg_trigger_depth() > 1 bypass"
+);
+
+// Execution order invariant: duplicate_enforcements table must precede protect_listing_security
+const duplicateEnforcementsIdx = migration015Content.indexOf("CREATE TABLE IF NOT EXISTS public.duplicate_enforcements");
+const protectListingSecurityIdx = migration015Content.indexOf("CREATE OR REPLACE FUNCTION public.protect_listing_security()");
+assert(
+  duplicateEnforcementsIdx !== -1 && protectListingSecurityIdx !== -1 && duplicateEnforcementsIdx < protectListingSecurityIdx,
+  "Migration 015 creates duplicate_enforcements table before protect_listing_security() to satisfy PostgreSQL plpgsql compile dependency"
+);
+
+// Least-privilege grant invariants: anon and authenticated must never receive unrestricted ALL on moderation tables
+assert(
+  !migration015Content.includes("GRANT ALL ON TABLE public.duplicate_enforcements TO postgres, anon"),
+  "Migration 015 does NOT grant ALL on duplicate_enforcements to anon/authenticated"
+);
+assert(
+  migration015Content.includes("GRANT SELECT ON TABLE public.duplicate_enforcements TO authenticated;"),
+  "Migration 015 grants SELECT ONLY on duplicate_enforcements to authenticated users (strikes are system/admin managed)"
+);
+assert(
+  !migration015Content.includes("GRANT ALL ON TABLE public.profile_reports TO postgres, anon"),
+  "Migration 015 restricts profile_reports permissions following least-privilege"
+);
+assert(
+  !migration015Content.includes("GRANT ALL ON TABLE public.preliminary_feedback TO postgres, anon"),
+  "Migration 015 restricts preliminary_feedback permissions following least-privilege"
+);
+
+// Fixed search_path invariants on all SECURITY DEFINER functions to prevent search_path hijacking
+const secDefinerCount = (migration015Content.match(/SECURITY DEFINER/g) || []).length;
+const safeSearchPathCount = (migration015Content.match(/SET search_path = public, pg_catalog/g) || []).length;
+assert(
+  secDefinerCount === 3 && safeSearchPathCount === 3,
+  "All 3 SECURITY DEFINER functions in Migration 015 enforce fixed search_path = public, pg_catalog"
+);
+
+// Function execute revocation invariants
+assert(
+  migration015Content.includes("REVOKE EXECUTE ON FUNCTION public.is_active_admin() FROM PUBLIC;"),
+  "Migration 015 revokes PUBLIC execution on is_active_admin()"
+);
+assert(
+  migration015Content.includes("REVOKE EXECUTE ON FUNCTION public.compute_duplicate_enforcement_strike() FROM PUBLIC;"),
+  "Migration 015 revokes PUBLIC execution on compute_duplicate_enforcement_strike()"
+);
+assert(
+  migration015Content.includes("REVOKE EXECUTE ON FUNCTION public.protect_listing_security() FROM PUBLIC;"),
+  "Migration 015 revokes PUBLIC execution on protect_listing_security()"
 );
 
 // -----------------------------------------------------------------------------

@@ -1,5 +1,6 @@
 "use server";
 
+// [IMPORT] Load Clerk authentication and Next.js cache revalidation helpers.
 import { auth } from "@clerk/nextjs/server";
 import { revalidatePath } from "next/cache";
 import {
@@ -7,11 +8,14 @@ import {
   createSupabaseServiceClient,
 } from "@/lib/supabase/server";
 
+// [FUNC] + [PARAM] + [RETURN] Fast local JWT check inspecting Clerk session claims for admin role.
+// Avoids slow, blocking external network roundtrips to Clerk servers.
 function checkAdminClaim(sessionClaims: unknown): boolean {
   const claims = sessionClaims as { publicMetadata?: { role?: string }; metadata?: { role?: string } } | null | undefined;
   return claims?.publicMetadata?.role === "admin" || claims?.metadata?.role === "admin";
 }
 
+// [TYPE] Union type listing the exact allowed booking lifecycle statuses.
 export type UpdatableBookingStatus =
   | "pending"
   | "accepted"
@@ -34,11 +38,14 @@ export type UpdatableBookingStatus =
  *    - Other users are rejected with an authorization error.
  * 4. Never fabricates success using local mock data — genuine database writes only.
  */
+// [FUNC] + [ASYNC] + [PARAM] Server Action enforcing authorized booking state transitions.
 export async function updateBookingStatusAction(
   bookingId: string,
   newStatus: UpdatableBookingStatus
 ) {
+  // [AUTH] + [ASYNC] Retrieve active Clerk user ID and verified session claims.
   const { userId, sessionClaims } = await auth();
+  // [IF] + [RETURN] Deny unauthenticated visitors immediately.
   if (!userId) {
     return {
       error: "You must be signed in to perform this action.",
@@ -46,10 +53,13 @@ export async function updateBookingStatusAction(
     };
   }
 
+  // [ERROR] Wrap database operations in try/catch.
   try {
+    // [DB] + [ASYNC] Get authenticated Supabase client for current user.
     const supabase = await createSupabaseServerClient();
 
     // 1. Fetch booking with listing relation to verify ownership
+    // [DB] + [METHOD] Query the booking record joined with the parent listing to identify the equipment owner.
     const { data: booking, error: fetchError } = await supabase
       .from("bookings")
       .select(`
@@ -62,6 +72,7 @@ export async function updateBookingStatusAction(
       .eq("id", bookingId)
       .maybeSingle();
 
+    // [IF] + [RETURN] Reject if booking does not exist.
     if (fetchError || !booking) {
       return {
         error: "Booking record not found in database.",
@@ -70,6 +81,7 @@ export async function updateBookingStatusAction(
     }
 
     // 2. Determine authorization
+    // [DECL] + [INIT] Derive identity roles relative to this specific reservation record.
     const isRenter = booking.renter_id === userId;
     const listingOwnerId = (booking.listing as unknown as { owner_id: string } | null)?.owner_id;
     const isOwner = listingOwnerId === userId;
@@ -88,6 +100,8 @@ export async function updateBookingStatusAction(
 
     let isAuthorized = false;
 
+    // [AUTH] + [IF] Enforce state transition matrix:
+    // Administrators can execute any valid transition.
     if (isAdmin) {
       isAuthorized = true;
     } else if (isOwner) {
@@ -122,6 +136,7 @@ export async function updateBookingStatusAction(
       }
     }
 
+    // [IF] + [RETURN] Reject unauthorized users trying to manipulate other people's reservations.
     if (!isAuthorized) {
       return {
         error: "Unauthorized: You do not have permission to perform this status transition.",
@@ -130,6 +145,7 @@ export async function updateBookingStatusAction(
     }
 
     // 3. Execute database update
+    // [DB] + [METHOD] Update booking status in PostgreSQL with updated timestamp.
     const { data, error } = await supabase
       .from("bookings")
       .update({
@@ -148,10 +164,12 @@ export async function updateBookingStatusAction(
       };
     }
 
+    // [METHOD] Purge Next.js cached pages so user dashboards and listing pages reflect updated status immediately.
     revalidatePath("/dashboard");
     if (booking.listing_id) {
       revalidatePath(`/listings/${booking.listing_id}`);
     }
+    // [RETURN] Send updated booking status back to client component.
     return { success: true, bookingId: data.id, status: data.status };
   } catch (err: unknown) {
     console.error("[updateBookingStatusAction] Exception:", err);

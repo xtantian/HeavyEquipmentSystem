@@ -1,11 +1,13 @@
 "use server";
 
+// [IMPORT] Load Clerk authentication, ISO date parsing helpers, Supabase client, and price calculation utilities.
 import { auth, currentUser } from "@clerk/nextjs/server";
 import { parseISO, isBefore, startOfToday } from "date-fns";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { RESERVATION_BLOCKING_STATUSES } from "@/lib/supabase/marketplace";
 import { calculateInclusiveRentalDays, calculateRentalTotalPrice } from "@/lib/utils";
 
+// [TYPE] Interface specifying input parameters for requesting an equipment booking.
 export interface CreateBookingParams {
   listingId: string;
   startDate: string; // YYYY-MM-DD
@@ -13,6 +15,7 @@ export interface CreateBookingParams {
   totalPrice?: number; // Client-supplied hint; server recalculates authoritatively
 }
 
+// [TYPE] Interface for the structured response returned to the booking card component.
 export interface CreateBookingResult {
   success?: boolean;
   bookingId?: string;
@@ -46,13 +49,16 @@ export interface CreateBookingResult {
  * 7. Server-side overlap checks and PostgreSQL exclusion constraint handling.
  * 8. NO false success via mock data fallback — failed DB operations return clear errors.
  */
+// [FUNC] + [ASYNC] + [PARAM] Authoritative Server Action creating a pending booking record.
 export async function createBookingAction(
   params: CreateBookingParams
 ): Promise<CreateBookingResult> {
   const { listingId, startDate, endDate } = params;
 
   // 1. Requires login
+  // [AUTH] + [ASYNC] Authenticate the requesting renter session via Clerk.
   const { userId } = await auth();
+  // [IF] + [RETURN] Reject immediately if the user is not authenticated.
   if (!userId) {
     return {
       error: "You must be signed in to request a booking.",
@@ -61,6 +67,7 @@ export async function createBookingAction(
   }
 
   // 2. Validate date inputs
+  // [VALIDATION] + [IF] + [RETURN] Verify that both start and end dates were selected.
   if (!startDate || !endDate) {
     return {
       error: "Please select both a start date and an end date.",
@@ -68,10 +75,12 @@ export async function createBookingAction(
     };
   }
 
+  // [METHOD] Parse ISO date strings into Date objects.
   const start = parseISO(startDate);
   const end = parseISO(endDate);
   const today = startOfToday();
 
+  // [VALIDATION] + [IF] Ensure parsed dates are mathematically valid dates.
   if (isNaN(start.getTime()) || isNaN(end.getTime())) {
     return {
       error: "Invalid rental dates specified.",
@@ -79,6 +88,7 @@ export async function createBookingAction(
     };
   }
 
+  // [VALIDATION] + [IF] Prevent bookings with start dates in the past.
   if (isBefore(start, today)) {
     return {
       error: "Rental start date cannot be in the past.",
@@ -86,6 +96,7 @@ export async function createBookingAction(
     };
   }
 
+  // [VALIDATION] + [IF] Enforce chronological ordering: end date must not precede start date.
   if (isBefore(end, start)) {
     return {
       error: "Rental end date must be on or after the start date.",
@@ -297,6 +308,7 @@ export async function createBookingAction(
     }
 
     // 7. Prevent booking own listing
+    // [IF] + [RETURN] Business Rule: Equipment owners cannot rent their own machinery.
     if (listing.owner_id && listing.owner_id === userId) {
       console.info("[createBookingAction] Owner attempted booking own listing:", {
         correlationId,
@@ -310,6 +322,7 @@ export async function createBookingAction(
     }
 
     // 8. Server-side authoritative price calculation (NEVER trust client price)
+    // [DECL] + [INIT] Convert daily rate to number and validate financial integrity.
     const pricePerDay = Number(listing.price_per_day);
     if (isNaN(pricePerDay) || pricePerDay < 0) {
       return {
@@ -318,7 +331,9 @@ export async function createBookingAction(
       };
     }
 
+    // [FUNC] Compute total calendar rental days inclusive of start and end date.
     const rentalDays = calculateInclusiveRentalDays(start, end);
+    // [VALIDATION] + [IF] Enforce minimum 1 full rental day.
     if (rentalDays < 1) {
       return {
         error: "Rental duration must be at least 1 day.",
@@ -326,9 +341,12 @@ export async function createBookingAction(
       };
     }
 
+    // [FUNC] Authoritatively compute final charge on the server: daily rate multiplied by rental days.
     const authoritativeTotalPrice = calculateRentalTotalPrice(pricePerDay, start, end);
 
     // 9. Server-side overlap check against active reservations
+    // [DB] + [METHOD] Query existing bookings overlapping the requested date interval:
+    // Formula: existing_start <= requested_end AND existing_end >= requested_start.
     const { data: overlappingBookings, error: overlapError } = await supabase
       .from("bookings")
       .select("id")
@@ -350,6 +368,7 @@ export async function createBookingAction(
       };
     }
 
+    // [IF] + [RETURN] Reject if any conflicting reservation is already active or accepted.
     if (overlappingBookings && overlappingBookings.length > 0) {
       console.info("[createBookingAction] Overlapping reservation conflict detected:", {
         correlationId,
@@ -363,6 +382,7 @@ export async function createBookingAction(
     }
 
     // 10. Insert booking into database
+    // [DB] + [OBJ] + [METHOD] Insert the validated booking record with initial status 'pending'.
     const { data: newBooking, error: insertError } = await supabase
       .from("bookings")
       .insert({
@@ -376,6 +396,7 @@ export async function createBookingAction(
       .select("id, total_price")
       .single();
 
+    // [IF] Check for insertion errors, specifically PostgreSQL 23P01 (exclusion constraint violation).
     if (insertError) {
       const errorMsg = (insertError.message || "").toLowerCase();
       const errorCode = insertError.code || "";
@@ -423,6 +444,7 @@ export async function createBookingAction(
       };
     }
 
+    // [RETURN] Return booking confirmation with server-calculated total price.
     return {
       success: true,
       bookingId: newBooking.id,
