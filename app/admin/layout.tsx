@@ -4,6 +4,7 @@ import { redirect } from "next/navigation";
 import { Navbar } from "@/components/landing/navbar";
 import { Footer } from "@/components/landing/footer";
 import { AdminNav } from "@/components/admin/admin-nav";
+import { AdminAccessDenied } from "@/components/admin/admin-access-denied";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
 export const dynamic = "force-dynamic";
@@ -48,9 +49,24 @@ export default async function AdminLayout({
     }
   }
 
-  // Reject non-admin access immediately at server level
+  // Reject non-admin access cleanly with informative feedback rather than silent bounce
   if (!isAdmin) {
-    redirect("/");
+    const userEmail =
+      (sessionClaims?.email as string) ||
+      (sessionClaims?.primaryEmail as string) ||
+      null;
+
+    return (
+      <div className="flex min-h-screen flex-col bg-background font-sans text-foreground">
+        <Navbar />
+        <main className="flex-1 bg-muted/20 py-8 sm:py-10">
+          <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
+            <AdminAccessDenied userEmail={userEmail} userId={userId} />
+          </div>
+        </main>
+        <Footer />
+      </div>
+    );
   }
 
   // 2. Fetch active reports count for navigation badge using the existing client

@@ -47,20 +47,37 @@ function StatusBadge({ status }: { status: EquipmentStatus }) {
   }
 }
 
+export const dynamic = "force-dynamic";
+
 export default async function EquipmentManagementPage() {
-  const supabase = await createSupabaseServerClient();
+  let equipment: EquipmentRow[] | null = null;
+  let categories: EquipmentCategoryRow[] | null = null;
+  let equipmentError: { message: string } | null = null;
+  let categoriesError: { message: string } | null = null;
 
-  // 1. Fetch equipment from Supabase
-  const { data: equipment, error: equipmentError } = await supabase
-    .from("equipment")
-    .select("*")
-    .order("name", { ascending: true });
+  try {
+    const supabase = await createSupabaseServerClient();
 
-  // 2. Fetch categories from Supabase
-  const { data: categories, error: categoriesError } = await supabase
-    .from("equipment_categories")
-    .select("*")
-    .order("name", { ascending: true });
+    // 1. Fetch equipment from Supabase
+    const { data: eqData, error: eqErr } = await supabase
+      .from("equipment")
+      .select("*")
+      .order("name", { ascending: true });
+    equipment = eqData;
+    equipmentError = eqErr;
+
+    // 2. Fetch categories from Supabase
+    const { data: catData, error: catErr } = await supabase
+      .from("equipment_categories")
+      .select("*")
+      .order("name", { ascending: true });
+    categories = catData;
+    categoriesError = catErr;
+  } catch (err: unknown) {
+    equipmentError = {
+      message: err instanceof Error ? err.message : "Failed to load equipment from database",
+    };
+  }
 
   // Map category IDs to category names for fast display lookup
   const categoryMap = new Map<string, string>();
@@ -71,7 +88,6 @@ export default async function EquipmentManagementPage() {
   }
 
   const equipmentList: EquipmentRow[] = equipment ?? [];
-  const categoryList: EquipmentCategoryRow[] = categories ?? [];
 
   // Summary counts for dashboard overview
   const totalCount = equipmentList.length;

@@ -1,6 +1,7 @@
 import Link from "next/link";
 import Image from "next/image";
 import { notFound } from "next/navigation";
+import { auth } from "@clerk/nextjs/server";
 import { format, parseISO } from "date-fns";
 import {
   User,
@@ -35,8 +36,9 @@ interface ListerProfilePageProps {
 export default async function ListerProfilePage({ params }: ListerProfilePageProps) {
   const { id } = await params;
 
-  // Query profile, ratings summary, reviews list, and active listings concurrently
-  const [profile, summary, reviews, listings] = await Promise.all([
+  // Query auth session, profile, ratings summary, reviews list, and active listings concurrently
+  const [{ userId }, profile, summary, reviews, listings] = await Promise.all([
+    auth(),
     getPublicListerProfile(id),
     getListerRatingSummary(id),
     getListerReviews(id),
@@ -141,15 +143,23 @@ export default async function ListerProfilePage({ params }: ListerProfilePagePro
                   All transactions and equipment handovers through Rent It are protected with deposit escrow.
                 </p>
                 <div className="pt-1">
-                  <ReportButton
-                    targetType="profile"
-                    targetId={id}
-                    targetTitle={profile?.name || "User Profile"}
-                    variant="outline"
-                    size="sm"
-                    label="Report User"
-                    className="h-7 text-xs text-muted-foreground hover:text-destructive hover:border-destructive/40"
-                  />
+                  {userId && userId === id ? (
+                    <Badge variant="secondary" className="h-7 text-xs bg-primary/10 text-primary border-primary/20 font-medium">
+                      Your Profile
+                    </Badge>
+                  ) : (
+                    <ReportButton
+                      targetType="profile"
+                      targetId={id}
+                      targetTitle={profile?.name || "User Profile"}
+                      targetOwnerId={id}
+                      currentUserId={userId || undefined}
+                      variant="outline"
+                      size="sm"
+                      label="Report User"
+                      className="h-7 text-xs text-muted-foreground hover:text-destructive hover:border-destructive/40"
+                    />
+                  )}
                 </div>
               </div>
             </div>

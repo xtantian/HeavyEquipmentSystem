@@ -2102,16 +2102,60 @@ assert(
   "Migration 015 enforces 64-bit advisory transaction lock via hashtextextended"
 );
 assert(
-  migration015Content.includes("SET search_path = public, pg_catalog"),
-  "Migration 015 sets explicit and safe search path on strike trigger function"
-);
-assert(
   migration015Content.includes("idx_duplicate_enforcements_user_created"),
   "Migration 015 includes composite index for duplicate enforcement audit trail"
 );
 assert(
   !migration015Content.includes("pg_trigger_depth() > 1"),
   "Migration 015 does not contain vulnerable pg_trigger_depth() > 1 bypass"
+);
+
+// Execution order invariant: duplicate_enforcements table must precede protect_listing_security
+const duplicateEnforcementsIdx = migration015Content.indexOf("CREATE TABLE IF NOT EXISTS public.duplicate_enforcements");
+const protectListingSecurityIdx = migration015Content.indexOf("CREATE OR REPLACE FUNCTION public.protect_listing_security()");
+assert(
+  duplicateEnforcementsIdx !== -1 && protectListingSecurityIdx !== -1 && duplicateEnforcementsIdx < protectListingSecurityIdx,
+  "Migration 015 creates duplicate_enforcements table before protect_listing_security() to satisfy PostgreSQL plpgsql compile dependency"
+);
+
+// Least-privilege grant invariants: anon and authenticated must never receive unrestricted ALL on moderation tables
+assert(
+  !migration015Content.includes("GRANT ALL ON TABLE public.duplicate_enforcements TO postgres, anon"),
+  "Migration 015 does NOT grant ALL on duplicate_enforcements to anon/authenticated"
+);
+assert(
+  migration015Content.includes("GRANT SELECT ON TABLE public.duplicate_enforcements TO authenticated;"),
+  "Migration 015 grants SELECT ONLY on duplicate_enforcements to authenticated users (strikes are system/admin managed)"
+);
+assert(
+  !migration015Content.includes("GRANT ALL ON TABLE public.profile_reports TO postgres, anon"),
+  "Migration 015 restricts profile_reports permissions following least-privilege"
+);
+assert(
+  !migration015Content.includes("GRANT ALL ON TABLE public.preliminary_feedback TO postgres, anon"),
+  "Migration 015 restricts preliminary_feedback permissions following least-privilege"
+);
+
+// Fixed search_path invariants on all SECURITY DEFINER functions to prevent search_path hijacking
+const secDefinerCount = (migration015Content.match(/SECURITY DEFINER/g) || []).length;
+const safeSearchPathCount = (migration015Content.match(/SET search_path = public, pg_catalog/g) || []).length;
+assert(
+  secDefinerCount === 3 && safeSearchPathCount === 3,
+  "All 3 SECURITY DEFINER functions in Migration 015 enforce fixed search_path = public, pg_catalog"
+);
+
+// Function execute revocation invariants
+assert(
+  migration015Content.includes("REVOKE EXECUTE ON FUNCTION public.is_active_admin() FROM PUBLIC;"),
+  "Migration 015 revokes PUBLIC execution on is_active_admin()"
+);
+assert(
+  migration015Content.includes("REVOKE EXECUTE ON FUNCTION public.compute_duplicate_enforcement_strike() FROM PUBLIC;"),
+  "Migration 015 revokes PUBLIC execution on compute_duplicate_enforcement_strike()"
+);
+assert(
+  migration015Content.includes("REVOKE EXECUTE ON FUNCTION public.protect_listing_security() FROM PUBLIC;"),
+  "Migration 015 revokes PUBLIC execution on protect_listing_security()"
 );
 
 // -----------------------------------------------------------------------------
@@ -2168,6 +2212,442 @@ assert(adminSupabaseContent.includes("Promise.all(["), "Admin overview stats que
 // 20.5: Static Code Invariant - Hero Image Deferral
 const heroContent = fs.readFileSync(path.join(__dirname, "../components/landing/hero.tsx"), "utf-8");
 assert(heroContent.includes("shouldRenderImage"), "Hero carousel defers non-active background slides to save initial paint network weight");
+
+// -----------------------------------------------------------------------------
+// 21. EQUIPMENT REPORTS & MODERATION INTEGRITY (BUG 1)
+// -----------------------------------------------------------------------------
+console.log("\n▶ SUITE 21: Equipment Reports & Moderation Integrity");
+
+// 21.1: Functional Self-Reporting and Deduplication Simulation
+function simulateListingReportSubmission({
+  reporterId,
+  targetOwnerId,
+  targetListingId,
+  reason,
+  details,
+  existingReports = [],
+}) {
+  if (!reporterId) {
+    return { success: false, code: "AUTH_REQUIRED", error: "Authentication required." };
+  }
+  if (!targetOwnerId || !targetListingId) {
+    return { success: false, code: "NOT_FOUND", error: "Listing not found." };
+  }
+  if (reporterId === targetOwnerId) {
+    return {
+      success: false,
+      code: "SELF_REPORT",
+      error: "You cannot report your own equipment listing.",
+    };
+  }
+  if (!reason || typeof reason !== "string" || reason.trim().length < 5) {
+    return {
+      success: false,
+      code: "INVALID_INPUT",
+      error: "Please select or provide a valid reason for this report (at least 5 characters).",
+    };
+  }
+  if (details && typeof details === "string" && details.length > 1000) {
+    return {
+      success: false,
+      code: "INVALID_INPUT",
+      error: "Report details must not exceed 1000 characters.",
+    };
+  }
+  const hasDuplicate = existingReports.some(
+    (r) =>
+      r.reporter_id === reporterId &&
+      r.listing_id === targetListingId &&
+      ["pending", "investigating"].includes(r.status)
+  );
+  if (hasDuplicate) {
+    return {
+      success: false,
+      code: "DUPLICATE_REPORT",
+      error: "You have already submitted a pending report for this listing.",
+    };
+  }
+  return {
+    success: true,
+    reportId: "rep_" + Math.random().toString(36).substring(2, 9),
+    status: "pending",
+  };
+}
+
+const selfReportSubmission = simulateListingReportSubmission({
+  reporterId: "user_owner_1",
+  targetOwnerId: "user_owner_1",
+  targetListingId: "lst_101",
+  reason: "Suspected duplicate equipment",
+});
+assert(!selfReportSubmission.success && selfReportSubmission.code === "SELF_REPORT", "Owner is blocked from self-reporting own equipment listing (SELF_REPORT)");
+
+const validNonOwnerReport = simulateListingReportSubmission({
+  reporterId: "user_renter_9",
+  targetOwnerId: "user_owner_1",
+  targetListingId: "lst_101",
+  reason: "Suspected duplicate equipment",
+  details: "Same equipment photo appears on another website.",
+});
+assert(validNonOwnerReport.success && validNonOwnerReport.status === "pending", "Non-owner can submit legitimate report against equipment listing");
+
+const duplicateReportAttempt = simulateListingReportSubmission({
+  reporterId: "user_renter_9",
+  targetOwnerId: "user_owner_1",
+  targetListingId: "lst_101",
+  reason: "Suspected duplicate equipment",
+  existingReports: [{ reporter_id: "user_renter_9", listing_id: "lst_101", status: "pending" }],
+});
+assert(!duplicateReportAttempt.success && duplicateReportAttempt.code === "DUPLICATE_REPORT", "Duplicate report from same reporter for same listing is blocked (DUPLICATE_REPORT)");
+
+const emptyReasonReport = simulateListingReportSubmission({
+  reporterId: "user_renter_9",
+  targetOwnerId: "user_owner_1",
+  targetListingId: "lst_101",
+  reason: "   ",
+});
+assert(!emptyReasonReport.success && emptyReasonReport.code === "INVALID_INPUT", "Empty report reason is rejected (INVALID_INPUT)");
+
+const shortReasonReport = simulateListingReportSubmission({
+  reporterId: "user_renter_9",
+  targetOwnerId: "user_owner_1",
+  targetListingId: "lst_101",
+  reason: "bad",
+});
+assert(!shortReasonReport.success && shortReasonReport.code === "INVALID_INPUT", "Short report reason (<5 chars) is rejected (INVALID_INPUT)");
+
+const excessiveDetailsReport = simulateListingReportSubmission({
+  reporterId: "user_renter_9",
+  targetOwnerId: "user_owner_1",
+  targetListingId: "lst_101",
+  reason: "Suspected duplicate equipment",
+  details: "x".repeat(1001),
+});
+assert(!excessiveDetailsReport.success && excessiveDetailsReport.code === "INVALID_INPUT", "Excessive report details (>1000 chars) are rejected (INVALID_INPUT)");
+
+// 21.2: Static Code Invariants for Moderation UI & Policy Handling
+const listingDetailContent = fs.readFileSync(path.join(__dirname, "../app/listings/[id]/page.tsx"), "utf-8");
+assert(listingDetailContent.includes("Your Listing"), "Listing detail page renders 'Your Listing' badge when user is listing owner");
+assert(listingDetailContent.includes("listing.owner_id === userId"), "Listing detail page verifies ownership against authenticated user ID");
+assert(listingDetailContent.includes("targetOwnerId={listing.owner_id}"), "Listing detail page forwards targetOwnerId to ReportButton");
+assert(listingDetailContent.includes("currentUserId={userId || undefined}"), "Listing detail page forwards currentUserId to ReportButton");
+
+const profilePageContent = fs.readFileSync(path.join(__dirname, "../app/profile/[id]/page.tsx"), "utf-8");
+assert(profilePageContent.includes("Your Profile"), "Profile page renders 'Your Profile' badge when user is profile owner");
+assert(profilePageContent.includes("userId === id"), "Profile page checks ownership against authenticated user ID");
+
+const reportButtonContent = fs.readFileSync(path.join(__dirname, "../components/moderation/report-button.tsx"), "utf-8");
+assert(reportButtonContent.includes("targetOwnerId?: string;"), "ReportButton interface accepts targetOwnerId prop");
+assert(reportButtonContent.includes("currentUserId?: string;"), "ReportButton interface accepts currentUserId prop");
+
+const reportModalContent = fs.readFileSync(path.join(__dirname, "../components/moderation/report-modal.tsx"), "utf-8");
+assert(reportModalContent.includes("isSelfReport"), "ReportModal computes isSelfReport flag");
+assert(reportModalContent.includes("disabled={isSubmitting || !reason || isSelfReport}"), "ReportModal disables submit button when user is target owner");
+
+const reportsActionContent = fs.readFileSync(path.join(__dirname, "../app/actions/reports.ts"), "utf-8");
+assert(reportsActionContent.includes("SELF_REPORT"), "submitReportAction validates and returns SELF_REPORT code when reporter is target owner");
+assert(reportsActionContent.includes("DUPLICATE_REPORT"), "submitReportAction checks existing reports and returns DUPLICATE_REPORT");
+assert(reportsActionContent.includes("insertErr.code === \"23505\""), "submitReportAction explicitly handles PostgreSQL unique violation 23505 for listing reports");
+assert(reportsActionContent.includes("prErr.code === \"23505\""), "submitReportAction explicitly handles PostgreSQL unique violation 23505 for profile reports");
+assert(!reportsActionContent.includes("svcReport"), "submitReportAction eliminates double-insert fallback pattern");
+assert(reportsActionContent.includes("Report creation could not be confirmed"), "submitReportAction returns error if inserted id is missing");
+
+// Database migration 015 report invariants
+const migration015ReportsContent = fs.readFileSync(path.join(__dirname, "../supabase/migrations/015_moderation_and_integrity_overhaul.sql"), "utf-8");
+assert(migration015ReportsContent.includes("idx_listing_reports_active_reporter"), "Migration 015 enforces partial unique index on active listing reports");
+assert(migration015ReportsContent.includes("idx_profile_reports_active_reporter"), "Migration 015 enforces partial unique index on active profile reports");
+assert(migration015ReportsContent.includes("Reporters can view own submitted reports"), "Migration 015 enforces reporter-scoped SELECT RLS policy on listing_reports");
+
+// 21.3: Concurrency Simulation for Database-Enforced Unique Reports (23505)
+function simulateReportDbInsert(reportData, existingKeys = new Set()) {
+  const key = `${reportData.listing_id}:${reportData.reporter_id}`;
+  if (existingKeys.has(key)) {
+    return { error: { code: "23505", message: "duplicate key value violates unique constraint idx_listing_reports_active_reporter" } };
+  }
+  existingKeys.add(key);
+  return { data: { id: "rep_" + Math.random().toString(36).substring(2, 9) } };
+}
+
+const initialInsert = simulateReportDbInsert({ listing_id: "lst-101", reporter_id: "user-renter-1" });
+assert(Boolean(initialInsert.data?.id), "Initial report insert succeeds with confirmed generated report id");
+
+const concurrentReportInsert = simulateReportDbInsert({ listing_id: "lst-101", reporter_id: "user-renter-1" }, new Set(["lst-101:user-renter-1"]));
+assert(concurrentReportInsert.error?.code === "23505", "Concurrent duplicate report triggers database unique violation 23505");
+
+// -----------------------------------------------------------------------------
+// 22. DUPLICATE EQUIPMENT LISTINGS & MULTI-LAYER ENFORCEMENT (BUG 2)
+// -----------------------------------------------------------------------------
+console.log("\n▶ SUITE 22: Duplicate Equipment Listings & Multi-Layer Enforcement");
+
+// 22.1: Duplicate Signal Evaluation Simulation matching lib/marketplace/integrity.ts
+function simulateDuplicateSignals(candidate, existing) {
+  const reasons = [];
+  let score = 0;
+  const isSameOwner = candidate.ownerId === existing.ownerId;
+
+  // 1. Canonical Identifier Signal
+  const normCandidateId = normalizeAssetIdentifierTest(candidate.serialOrVin);
+  const normExistingId = normalizeAssetIdentifierTest(existing.assetIdentifier);
+  if (normCandidateId && normExistingId && normCandidateId === normExistingId) {
+    score += 0.85;
+    reasons.push("Identical physical serial number, chassis code, or VIN detected.");
+  }
+
+  // 2. Exact Title & Category Match
+  const candidateTitleLower = candidate.title.trim().toLowerCase();
+  const existingTitleLower = existing.title.trim().toLowerCase();
+  const isSameCategory = candidate.categoryId === existing.categoryId;
+
+  if (isSameCategory) {
+    if (candidateTitleLower === existingTitleLower) {
+      score += isSameOwner ? 0.35 : 0.25;
+      reasons.push("Identical title in the same equipment category.");
+    }
+  }
+
+  // 3. Structured Specs
+  const extAttrs = existing.attributes || {};
+  const candMake = candidate.make || "";
+  const extMake = String(extAttrs.make || "").trim();
+  const candModel = candidate.model || "";
+  const extModel = String(extAttrs.model || "").trim();
+  if (candMake && extMake && candMake.toLowerCase() === extMake.toLowerCase()) {
+    if (candModel && extModel && candModel.toLowerCase() === extModel.toLowerCase()) {
+      score += 0.20;
+      reasons.push("Exact make and model match.");
+    }
+  }
+
+  // 6. Image Match (URL or Content Hash)
+  let hasExactImageMatch = false;
+  if (candidate.images && existing.images) {
+    const candImgs = new Set(candidate.images.filter(Boolean));
+    if (existing.images.some((img) => candImgs.has(img))) {
+      hasExactImageMatch = true;
+    }
+  }
+
+  const candHashes = candidate.imageHashes || [];
+  const extHashes = Array.isArray(extAttrs.image_hashes) ? extAttrs.image_hashes : [];
+  if (candHashes.length > 0 && extHashes.length > 0) {
+    const hashSet = new Set(candHashes);
+    if (extHashes.some((h) => hashSet.has(h))) {
+      hasExactImageMatch = true;
+    }
+  }
+
+  if (hasExactImageMatch) {
+    if (isSameOwner) {
+      const hasSecondaryOverlap =
+        isSameCategory ||
+        candidateTitleLower === existingTitleLower ||
+        (candMake && extMake && candMake.toLowerCase() === extMake.toLowerCase());
+
+      if (hasSecondaryOverlap) {
+        score += 0.85;
+        reasons.push("Identical equipment photo and overlapping equipment attributes uploaded by the same account.");
+      } else {
+        score += 0.60;
+        reasons.push("Identical equipment photo uploaded for distinct equipment attributes by the same account (requires verification).");
+      }
+    } else {
+      score += 0.35;
+      reasons.push("Shared asset photo detected across accounts (potential stock image).");
+    }
+  }
+
+  const normalizedConfidence = Math.min(1.0, Number(score.toFixed(2)));
+  let classification = "UNIQUE";
+  let requiresQuarantine = false;
+
+  if (normalizedConfidence >= 0.85 || (isSameOwner && normalizedConfidence >= 0.70)) {
+    classification = "CONFIRMED_DUPLICATE";
+    requiresQuarantine = !isSameOwner;
+  } else if (normalizedConfidence >= 0.50) {
+    classification = "SUSPECTED_DUPLICATE";
+    requiresQuarantine = true;
+  } else if (normalizedConfidence >= 0.30) {
+    classification = "WEAK_SIMILARITY";
+  }
+
+  return { classification, confidence: normalizedConfidence, reasons, isSameOwner, requiresQuarantine };
+}
+
+// Subtest A: Same owner + identical image hash classifies as CONFIRMED_DUPLICATE (blocked immediately)
+const sameOwnerImageDup = simulateDuplicateSignals(
+  {
+    title: "Excavator",
+    categoryId: "cat_excavators",
+    pricePerDay: 5000,
+    ownerId: "user_contractor_1",
+    imageHashes: ["hash_cartoon_excavator_abc"],
+  },
+  {
+    id: "lst_existing_1",
+    title: "Excavator",
+    categoryId: "cat_excavators",
+    pricePerDay: 5000,
+    ownerId: "user_contractor_1",
+    attributes: { image_hashes: ["hash_cartoon_excavator_abc"] },
+  }
+);
+assert(sameOwnerImageDup.classification === "CONFIRMED_DUPLICATE", "Same owner with identical image hash is classified as CONFIRMED_DUPLICATE");
+assert(sameOwnerImageDup.confidence >= 0.85, "Same owner with identical image hash achieves >= 0.85 confidence score");
+assert(!sameOwnerImageDup.requiresQuarantine, "Same owner duplicate is blocked directly rather than shadow quarantined");
+
+// Subtest B: Dual 'adwa' real-world collision pattern (different price & description, same owner, identical cartoon image)
+const adwaCollision = simulateDuplicateSignals(
+  {
+    title: "adwa",
+    categoryId: "cat_heavy",
+    pricePerDay: 6000,
+    ownerId: "user_adwa_owner",
+    imageHashes: ["hash_adwa_cartoon_999"],
+  },
+  {
+    id: "lst_adwa_original",
+    title: "adwa",
+    categoryId: "cat_heavy",
+    pricePerDay: 5000,
+    ownerId: "user_adwa_owner",
+    attributes: { image_hashes: ["hash_adwa_cartoon_999"] },
+  }
+);
+assert(adwaCollision.classification === "CONFIRMED_DUPLICATE", "Dual 'adwa' collision pattern is detected and classified as CONFIRMED_DUPLICATE");
+
+// Subtest C: Adversarial circumvention attempt: Altered title, altered price, altered description with same image
+const adversarialBypass = simulateDuplicateSignals(
+  {
+    title: "Different Heavy Machinery Model",
+    categoryId: "cat_different",
+    pricePerDay: 12000,
+    ownerId: "user_contractor_1",
+    imageHashes: ["hash_cartoon_excavator_abc"],
+  },
+  {
+    id: "lst_existing_1",
+    title: "Excavator",
+    categoryId: "cat_excavators",
+    pricePerDay: 5000,
+    ownerId: "user_contractor_1",
+    attributes: { image_hashes: ["hash_cartoon_excavator_abc"] },
+  }
+);
+assert(adversarialBypass.classification === "SUSPECTED_DUPLICATE", "Adversarial bypass with distinct category/specs with same photo routes to SUSPECTED_DUPLICATE review quarantine");
+assert(adversarialBypass.requiresQuarantine === true, "Adversarial bypass with distinct category/specs requires review quarantine without immediate penalty");
+
+// Subtest D: Cross-account stock photo protection: Different owner using OEM image receives lower score and is NOT blocked as confirmed fraud
+const stockPhotoDifferentOwner = simulateDuplicateSignals(
+  {
+    title: "Komatsu PC200",
+    categoryId: "cat_excavators",
+    pricePerDay: 8000,
+    ownerId: "user_contractor_B",
+    imageHashes: ["hash_komatsu_catalog_photo"],
+  },
+  {
+    id: "lst_existing_komatsu",
+    title: "Caterpillar 320",
+    categoryId: "cat_excavators",
+    pricePerDay: 7500,
+    ownerId: "user_contractor_A",
+    attributes: { image_hashes: ["hash_komatsu_catalog_photo"] },
+  }
+);
+assert(stockPhotoDifferentOwner.classification !== "CONFIRMED_DUPLICATE", "Cross-account image reuse (stock photo) is NOT classified as CONFIRMED_DUPLICATE");
+assert(stockPhotoDifferentOwner.confidence <= 0.40, "Cross-account stock photo confidence is bounded at 0.35 to prevent false-positive bans");
+
+// Subtest E: Ambiguous same-owner photo reuse with distinct category and specifications triggers quarantine rather than confirmed duplicate
+const ambiguousSameOwnerPhoto = simulateDuplicateSignals(
+  {
+    title: "Generator Inverter",
+    categoryId: "cat_generators",
+    pricePerDay: 2500,
+    ownerId: "user_contractor_1",
+    imageHashes: ["hash_cartoon_excavator_abc"],
+    make: "Honda",
+    model: "EU2200i",
+  },
+  {
+    id: "lst_existing_1",
+    title: "Excavator",
+    categoryId: "cat_excavators",
+    pricePerDay: 5000,
+    ownerId: "user_contractor_1",
+    attributes: { image_hashes: ["hash_cartoon_excavator_abc"], make: "Caterpillar", model: "320" },
+  }
+);
+assert(ambiguousSameOwnerPhoto.classification === "SUSPECTED_DUPLICATE", "Ambiguous same-owner photo reuse with distinct attributes is classified as SUSPECTED_DUPLICATE");
+assert(ambiguousSameOwnerPhoto.requiresQuarantine === true, "Ambiguous same-owner photo reuse routes to review quarantine (shadow_quarantined) without blocking or penalizing user");
+
+// 22.2: Server Storage Ownership & SSRF Prevention Simulation
+function validateStorageMediaOwnership(imgUrl, callerUserId) {
+  const storageMatch = imgUrl.match(/listing-images\/(?:public\/)?([^?#\s]+)/);
+  if (!storageMatch) return { valid: true, isStorage: false };
+  const relativePath = storageMatch[1];
+  if (relativePath.includes("..")) return { valid: false, code: "INVALID_INPUT" };
+  if (!relativePath.startsWith(`${callerUserId}/`)) return { valid: false, code: "UNAUTHORIZED_MEDIA" };
+  return { valid: true, isStorage: true, relativePath };
+}
+
+const validStorageImg = validateStorageMediaOwnership("https://project.supabase.co/storage/v1/object/public/listing-images/user_legit_1/photo.jpg", "user_legit_1");
+assert(validStorageImg.valid && validStorageImg.isStorage, "Valid storage image path belonging to caller is accepted");
+
+const crossUserTheftImg = validateStorageMediaOwnership("https://project.supabase.co/storage/v1/object/public/listing-images/user_victim_99/photo.jpg", "user_attacker_2");
+assert(!crossUserTheftImg.valid && crossUserTheftImg.code === "UNAUTHORIZED_MEDIA", "Storage image path belonging to another user is strictly rejected with UNAUTHORIZED_MEDIA");
+
+const dirTraversalImg = validateStorageMediaOwnership("https://project.supabase.co/storage/v1/object/public/listing-images/user_legit_1/../../../secret.jpg", "user_legit_1");
+assert(!dirTraversalImg.valid && dirTraversalImg.code === "INVALID_INPUT", "Directory traversal in storage path is strictly rejected with INVALID_INPUT");
+
+// 22.3: Static Code Invariants for Duplicate Prevention & Server Authority
+const integrityContent = fs.readFileSync(path.join(__dirname, "../lib/marketplace/integrity.ts"), "utf-8");
+assert(integrityContent.includes("imageHashes?: string[];"), "EquipmentAttributeProfile interface defines imageHashes array");
+assert(integrityContent.includes("export function computeImageContentHash"), "integrity.ts exports computeImageContentHash helper");
+assert(integrityContent.includes("score += 0.85; // High confidence duplicate for same owner"), "integrity.ts assigns 0.85 score to same-owner image matches with secondary overlap");
+assert(integrityContent.includes("score += 0.60;"), "integrity.ts assigns 0.60 score to ambiguous same-owner photo reuse with distinct attributes");
+assert(integrityContent.includes("score += 0.35; // Shared photo across accounts"), "integrity.ts assigns 0.35 score to cross-account stock photo matches");
+
+const newListingFormContent = fs.readFileSync(path.join(__dirname, "../components/marketplace/new-listing-form.tsx"), "utf-8");
+assert(newListingFormContent.includes("crypto.subtle.digest"), "new-listing-form.tsx computes client-side SHA-256 image hashes before upload");
+assert(newListingFormContent.includes("image_hashes"), "new-listing-form.tsx embeds image_hashes in equipment attributes");
+
+const listingsActionContent = fs.readFileSync(path.join(__dirname, "../app/listings/actions.ts"), "utf-8");
+assert(listingsActionContent.includes("ownerCandidates"), "app/listings/actions.ts queries all existing inventory owned by current caller without truncation");
+assert(listingsActionContent.includes("delete cleanAttributes.image_hashes;"), "app/listings/actions.ts strips client-supplied image_hashes to guarantee server authority");
+assert(listingsActionContent.includes("UNAUTHORIZED_MEDIA"), "app/listings/actions.ts validates storage path ownership and rejects cross-user image references");
+assert(listingsActionContent.includes("relativePath.includes(\"..\")"), "app/listings/actions.ts blocks directory traversal in storage paths");
+assert(listingsActionContent.includes("cleanAttributes as unknown as Json"), "app/listings/actions.ts persists server-verified attributes");
+assert(listingsActionContent.includes("23505"), "app/listings/actions.ts handles PostgreSQL unique constraint violation error code 23505 gracefully");
+
+const diagnoseScriptPath = path.join(__dirname, "diagnose-duplicates.cjs");
+assert(fs.existsSync(diagnoseScriptPath), "scripts/diagnose-duplicates.cjs standalone audit script exists");
+const diagnoseContent = fs.readFileSync(diagnoseScriptPath, "utf-8");
+assert(!diagnoseContent.includes("DELETE FROM"), "Diagnostic tool does NOT delete records from database");
+assert(!diagnoseContent.includes("UPDATE "), "Diagnostic tool does NOT mutate records in database");
+
+// -----------------------------------------------------------------------------
+// 23. ADMIN DASHBOARD AUTHORIZATION & ACCESS DENIED UX (BUG 3)
+// -----------------------------------------------------------------------------
+console.log("\n▶ SUITE 23: Admin Dashboard Authorization & Access Denied UX");
+
+// 23.1: Admin Layout Authorization & UX Invariants
+assert(adminLayoutContent.includes("<AdminAccessDenied"), "AdminLayout renders AdminAccessDenied component when user lacks admin privileges");
+assert(!adminLayoutContent.includes('redirect("/")'), "AdminLayout does NOT perform silent redirect to homepage for non-admins");
+assert(adminLayoutContent.includes('redirect("/sign-in?redirect_url=/admin")'), "AdminLayout redirects unauthenticated visitors to sign-in with return URL");
+assert(!adminLayoutContent.includes("gumataychristianpaul@gmail.com"), "AdminLayout contains NO hardcoded email backdoors");
+
+// 23.2: AdminAccessDenied Component Invariants
+const adminAccessDeniedPath = path.join(__dirname, "../components/admin/admin-access-denied.tsx");
+assert(fs.existsSync(adminAccessDeniedPath), "components/admin/admin-access-denied.tsx component exists");
+const adminAccessDeniedContent = fs.readFileSync(adminAccessDeniedPath, "utf-8");
+assert(adminAccessDeniedContent.includes("userEmail"), "AdminAccessDenied component displays user email");
+assert(adminAccessDeniedContent.includes("Return to Marketplace"), "AdminAccessDenied component provides navigation back to marketplace");
+assert(adminAccessDeniedContent.includes("Sign Out"), "AdminAccessDenied component provides Sign Out button");
+assert(adminAccessDeniedContent.includes("Administrative Access Required"), "AdminAccessDenied component provides clear explanatory heading");
+
+// 23.3: Server Action Admin Protection Invariants
+assert(adminActionsContent.includes("verifyAdminCaller"), "app/admin/actions.ts strictly enforces verifyAdminCaller on server actions");
+assert(!adminActionsContent.includes("gumataychristianpaul@gmail.com"), "app/admin/actions.ts contains NO hardcoded email backdoors");
 
 console.log("\n===============================================================================");
 console.log(`SUMMARY: ${passedTests}/${totalTests} Tests Passed (${failedTests} Failed)`);

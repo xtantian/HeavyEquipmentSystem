@@ -66,7 +66,15 @@ export interface EquipmentAttributeProfile {
   year?: number | string;
   serialOrVin?: string | null;
   images?: string[];
+  imageHashes?: string[];
   ownerId?: string;
+}
+
+/**
+ * Computes SHA-256 hash for image binary buffer or string payload.
+ */
+export function computeImageContentHash(content: string | Buffer): string {
+  return createHash("sha256").update(content).digest("hex");
 }
 
 export type DuplicateClassification =
@@ -197,13 +205,46 @@ export function evaluateDuplicateSignals(
     }
   }
 
-  // 6. Image URL Collision
+  // 6. Image Match (URL or Content Hash)
+  let hasExactImageMatch = false;
   if (candidate.images && existing.images) {
     const candImgs = new Set(candidate.images.filter(Boolean));
     const sharedImages = existing.images.filter((img) => candImgs.has(img));
     if (sharedImages.length > 0) {
-      score += 0.3;
-      reasons.push(`Shared asset photos (${sharedImages.length} identical image references).`);
+      hasExactImageMatch = true;
+    }
+  }
+
+  // Check image content hashes if provided
+  const candHashes = candidate.imageHashes || [];
+  const extHashes = Array.isArray(extAttrs.image_hashes) ? (extAttrs.image_hashes as string[]) : [];
+  if (candHashes.length > 0 && extHashes.length > 0) {
+    const hashSet = new Set(candHashes);
+    const sharedHashes = extHashes.filter((h) => hashSet.has(h));
+    if (sharedHashes.length > 0) {
+      hasExactImageMatch = true;
+    }
+  }
+
+  if (hasExactImageMatch) {
+    if (isSameOwner) {
+      // Check if title, category, or specs also indicate duplicate equipment
+      const hasSecondaryOverlap =
+        isSameCategory ||
+        candidateTitleLower === existingTitleLower ||
+        (candMake && extMake && candMake.toLowerCase() === extMake.toLowerCase());
+
+      if (hasSecondaryOverlap) {
+        score += 0.85; // High confidence duplicate for same owner
+        reasons.push("Identical equipment photo and overlapping equipment attributes uploaded by the same account.");
+      } else {
+        // Matching image alone with completely distinct category & specs: ambiguous situation -> quarantine for review
+        score += 0.60;
+        reasons.push("Identical equipment photo uploaded for distinct equipment attributes by the same account (requires verification).");
+      }
+    } else {
+      score += 0.35; // Shared photo across accounts (potential stock image)
+      reasons.push("Shared asset photo detected across accounts (potential stock image).");
     }
   }
 
@@ -212,13 +253,13 @@ export function evaluateDuplicateSignals(
   let classification: DuplicateClassification = "UNIQUE";
   let requiresQuarantine = false;
 
-  if (normalizedConfidence >= 0.85) {
+  if (normalizedConfidence >= 0.85 || (isSameOwner && normalizedConfidence >= 0.70)) {
     classification = "CONFIRMED_DUPLICATE";
     requiresQuarantine = !isSameOwner; // Cross-account high confidence requires quarantine
-  } else if (normalizedConfidence >= 0.65) {
+  } else if (normalizedConfidence >= 0.50) {
     classification = "SUSPECTED_DUPLICATE";
     requiresQuarantine = true;
-  } else if (normalizedConfidence >= 0.35) {
+  } else if (normalizedConfidence >= 0.30) {
     classification = "WEAK_SIMILARITY";
   }
 

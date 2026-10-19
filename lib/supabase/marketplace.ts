@@ -2,23 +2,22 @@ import "server-only";
 
 import { unstable_cache } from "next/cache";
 import { createClient } from "@supabase/supabase-js";
-import { createSupabaseServerClient } from "./server";
+import { createSupabaseServerClient, getSupabaseUrl, getSupabasePublishableKey } from "./server";
 import type { Database, CategoryRow } from "./types";
 import { MARKETPLACE_CATEGORIES } from "@/lib/marketplace/categories";
 import { MOCK_LISTINGS, MOCK_BOOKINGS, type MarketplaceListingItem } from "@/lib/marketplace/mock-listings";
 
 function getPublicClient() {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.VITE_SUPABASE_URL;
-  const key =
-    process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ||
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
-    process.env.VITE_SUPABASE_ANON_KEY;
-  if (!url || !key) return null;
+  const url = getSupabaseUrl();
+  const key = getSupabasePublishableKey();
+  if (!url || !key || url.includes("ubphrityabunayxrhqkj")) return null;
   return createClient<Database>(url, key);
 }
 
+// [FUNC] + [ASYNC] Fetches category taxonomy records from the database with mock fallback.
 async function fetchCategoriesFromDb(): Promise<CategoryRow[]> {
   try {
+    // [DB] Query all available categories ordered alphabetically.
     const supabase = getPublicClient() || (await createSupabaseServerClient());
     const { data, error } = await supabase
       .from("categories")
@@ -45,12 +44,14 @@ async function fetchCategoriesFromDb(): Promise<CategoryRow[]> {
   }));
 }
 
+// [FUNC] Next.js Data Cache wrapper caching category metadata for 1 hour across all users.
 const getCachedMarketplaceCategoriesInternal = unstable_cache(
   fetchCategoriesFromDb,
   ["marketplace-categories"],
   { revalidate: 3600, tags: ["marketplace-categories"] }
 );
 
+// [FUNC] + [RETURN] Public accessor returning cached categories with automatic fallback.
 export async function getMarketplaceCategories(): Promise<CategoryRow[]> {
   try {
     return await getCachedMarketplaceCategoriesInternal();
@@ -59,6 +60,7 @@ export async function getMarketplaceCategories(): Promise<CategoryRow[]> {
   }
 }
 
+// [DECL] + [ARRAY] Rental reservation statuses that hold equipment and block concurrent bookings.
 export const RESERVATION_BLOCKING_STATUSES = [
   "pending",
   "accepted",
@@ -87,12 +89,15 @@ export interface MarketplaceListingsResult {
   totalPages: number;
 }
 
+// [FUNC] + [ASYNC] + [PARAM] Authoritative search and browse query function with server-side pagination.
 export async function getMarketplaceListings(
   options: ListingsQueryOptions = {}
 ): Promise<MarketplaceListingsResult> {
   const { category, q, start, end, min, max } = options;
+  // [VALIDATION] + [DECL] Clamp pagination inputs to ensure page >= 1 and 1 <= pageSize <= 100.
   const page = Math.max(1, Number(options.page) || 1);
   const pageSize = Math.min(100, Math.max(1, Number(options.limit) || 24));
+  // [INIT] Compute SQL offset for Postgres range pagination.
   const offset = (page - 1) * pageSize;
 
   try {
@@ -121,6 +126,7 @@ export async function getMarketplaceListings(
     }
 
     // 2. Identify booked listings in the requested date range
+    // [DECL] Array holding IDs of listings already reserved in the desired date window.
     let bookedListingIds: string[] = [];
     if (start || end) {
       let bookingsQuery = supabase
@@ -128,6 +134,7 @@ export async function getMarketplaceListings(
         .select("listing_id")
         .in("status", [...RESERVATION_BLOCKING_STATUSES]);
 
+      // [DB] Filter for overlapping reservations.
       if (start && end) {
         bookingsQuery = bookingsQuery.lte("start_date", end).gte("end_date", start);
       } else if (start) {

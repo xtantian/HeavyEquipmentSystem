@@ -9,6 +9,8 @@ interface ReportButtonProps {
   targetType: "listing" | "profile";
   targetId: string;
   targetTitle: string;
+  targetOwnerId?: string;
+  currentUserId?: string;
   variant?: "ghost" | "outline" | "secondary";
   size?: "default" | "sm" | "icon";
   className?: string;
@@ -19,6 +21,8 @@ export function ReportButton({
   targetType,
   targetId,
   targetTitle,
+  targetOwnerId,
+  currentUserId,
   variant = "ghost",
   size = "sm",
   className,
@@ -46,6 +50,8 @@ export function ReportButton({
         targetType={targetType}
         targetId={targetId}
         targetTitle={targetTitle}
+        targetOwnerId={targetOwnerId}
+        currentUserId={currentUserId}
       />
     </>
   );

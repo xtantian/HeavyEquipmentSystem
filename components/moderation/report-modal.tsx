@@ -12,6 +12,8 @@ interface ReportModalProps {
   targetType: "listing" | "profile";
   targetId: string;
   targetTitle: string;
+  targetOwnerId?: string;
+  currentUserId?: string;
 }
 
 const LISTING_REASONS = [
@@ -38,6 +40,8 @@ export function ReportModal({
   targetType,
   targetId,
   targetTitle,
+  targetOwnerId,
+  currentUserId,
 }: ReportModalProps) {
   const [reason, setReason] = React.useState<string>("");
   const [details, setDetails] = React.useState<string>("");
@@ -57,8 +61,14 @@ export function ReportModal({
 
   const reasonsList = targetType === "listing" ? LISTING_REASONS : PROFILE_REASONS;
 
+  const isSelfReport = Boolean(targetOwnerId && currentUserId && targetOwnerId === currentUserId);
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSelfReport) {
+      setErrorMessage(`You cannot report your own ${targetType === "listing" ? "equipment listing" : "profile"}.`);
+      return;
+    }
     if (!reason) {
       setErrorMessage("Please select a reason for reporting.");
       return;
@@ -136,6 +146,13 @@ export function ReportModal({
           </div>
         ) : (
           <form onSubmit={handleSubmit} className="space-y-4">
+            {isSelfReport && (
+              <div className="flex items-center gap-2 rounded-xl bg-amber-500/10 border border-amber-500/20 p-3 text-xs text-amber-700 dark:text-amber-400">
+                <AlertCircle className="h-4 w-4 shrink-0" />
+                <span>You are registered as the owner of this {targetType === "listing" ? "equipment listing" : "profile"}. Platform integrity policies do not allow self-reporting.</span>
+              </div>
+            )}
+
             {errorMessage && (
               <div className="flex items-center gap-2 rounded-xl bg-destructive/10 border border-destructive/20 p-3 text-xs text-destructive">
                 <AlertCircle className="h-4 w-4 shrink-0" />
@@ -207,7 +224,7 @@ export function ReportModal({
                 type="submit"
                 variant="destructive"
                 size="sm"
-                disabled={isSubmitting || !reason}
+                disabled={isSubmitting || !reason || isSelfReport}
                 className="text-xs font-semibold cursor-pointer"
               >
                 {isSubmitting ? (

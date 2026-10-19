@@ -78,6 +78,14 @@ export async function submitReportAction(
       reporterEmail = prof?.email || null;
     }
 
+    // Resolve report writer client: prefer service client to ensure single-transaction execution and guaranteed id return
+    let reportDbClient;
+    try {
+      reportDbClient = createSupabaseServiceClient();
+    } catch {
+      reportDbClient = supabase;
+    }
+
     if (targetType === "listing") {
       // 1. Verify listing exists and is not owned by the reporter
       const { data: listing, error: listingErr } = await supabase
@@ -103,7 +111,7 @@ export async function submitReportAction(
       }
 
       // 2. Prevent duplicate pending reports from the same reporter
-      const { data: existingReport } = await supabase
+      const { data: existingReport } = await reportDbClient
         .from("listing_reports")
         .select("id, status")
         .eq("listing_id", targetId)
@@ -119,8 +127,8 @@ export async function submitReportAction(
         };
       }
 
-      // 3. Persist listing report
-      const { data: inserted, error: insertErr } = await supabase
+      // 3. Persist listing report (exactly ONE single insert)
+      const { data: inserted, error: insertErr } = await reportDbClient
         .from("listing_reports")
         .insert({
           listing_id: targetId,
@@ -131,13 +139,34 @@ export async function submitReportAction(
           status: "pending",
         })
         .select("id")
-        .single();
+        .maybeSingle();
 
-      if (insertErr || !inserted) {
-        console.error("[submitReportAction] Listing report insert error:", insertErr?.message);
+      if (insertErr) {
+        // Concurrency handling: catch PostgreSQL unique violation 23505
+        if (
+          insertErr.code === "23505" ||
+          insertErr.message?.includes("duplicate key") ||
+          insertErr.message?.includes("unique")
+        ) {
+          return {
+            success: false,
+            error: "You have already submitted an active report for this listing. Our moderation team is reviewing it.",
+            code: "DUPLICATE_REPORT",
+          };
+        }
+
+        console.error("[submitReportAction] Listing report insert error:", insertErr.message);
         return {
           success: false,
           error: "Failed to save listing report. Please try again.",
+          code: "ERROR",
+        };
+      }
+
+      if (!inserted?.id) {
+        return {
+          success: false,
+          error: "Report creation could not be confirmed.",
           code: "ERROR",
         };
       }
@@ -171,68 +200,70 @@ export async function submitReportAction(
         };
       }
 
-      // Attempt insert into profile_reports table
-      try {
-        const { data: profileReport, error: prErr } = await supabase
-          .from("profile_reports")
-          .insert({
-            target_user_id: targetId,
-            reporter_id: userId,
-            reporter_email: reporterEmail,
-            reason: trimmedReason,
-            details: trimmedDetails,
-            status: "pending",
-          })
-          .select("id")
-          .single();
+      // 2. Prevent duplicate active reports from the same reporter
+      const { data: existingProfileRep } = await reportDbClient
+        .from("profile_reports")
+        .select("id, status")
+        .eq("target_user_id", targetId)
+        .eq("reporter_id", userId)
+        .in("status", ["pending", "under_review"])
+        .maybeSingle();
 
-        if (prErr) {
-          // Fallback to service client if table exists but caller lacks write
-          const serviceClient = createSupabaseServiceClient();
-          const { data: svcReport, error: svcErr } = await serviceClient
-            .from("profile_reports")
-            .insert({
-              target_user_id: targetId,
-              reporter_id: userId,
-              reporter_email: reporterEmail,
-              reason: trimmedReason,
-              details: trimmedDetails,
-              status: "pending",
-            })
-            .select("id")
-            .single();
-
-          if (!svcErr && svcReport) {
-            return { success: true, reportId: svcReport.id };
-          }
-        } else if (profileReport) {
-          return { success: true, reportId: profileReport.id };
-        }
-      } catch (profileTableErr) {
-        console.warn("[submitReportAction] profile_reports table pending, fallback logged:", profileTableErr);
+      if (existingProfileRep) {
+        return {
+          success: false,
+          error: "You have already submitted an active report for this user profile. Our moderation team is reviewing it.",
+          code: "DUPLICATE_REPORT",
+        };
       }
 
-      // Resilient fallback: record admin audit log of the profile violation report
-      try {
-        const serviceClient = createSupabaseServiceClient();
-        await serviceClient.from("admin_audit_logs").insert({
-          admin_id: userId,
-          admin_email: reporterEmail,
-          action: "user_profile_reported",
-          target_type: "user",
-          target_id: targetId,
-          details: {
-            reason: trimmedReason,
-            details: trimmedDetails,
-            reported_at: new Date().toISOString(),
-          },
-        });
-      } catch (auditErr) {
-        console.warn("[submitReportAction] Audit log fallback warning:", auditErr);
+      // 3. Persist profile report (exactly ONE single insert)
+      const { data: profileReport, error: prErr } = await reportDbClient
+        .from("profile_reports")
+        .insert({
+          target_user_id: targetId,
+          reporter_id: userId,
+          reporter_email: reporterEmail,
+          reason: trimmedReason,
+          details: trimmedDetails,
+          status: "pending",
+        })
+        .select("id")
+        .maybeSingle();
+
+      if (prErr) {
+        // Concurrency handling: catch PostgreSQL unique violation 23505
+        if (
+          prErr.code === "23505" ||
+          prErr.message?.includes("duplicate key") ||
+          prErr.message?.includes("unique")
+        ) {
+          return {
+            success: false,
+            error: "You have already submitted an active report for this user profile. Our moderation team is reviewing it.",
+            code: "DUPLICATE_REPORT",
+          };
+        }
+
+        console.error("[submitReportAction] Profile report insert error:", prErr.message);
+        return {
+          success: false,
+          error: "Failed to save profile report. Please try again.",
+          code: "ERROR",
+        };
+      }
+
+      if (!profileReport?.id) {
+        return {
+          success: false,
+          error: "Profile report creation could not be confirmed.",
+          code: "ERROR",
+        };
       }
 
       return {
         success: true,
+        reportId: profileReport.id,
       };
     }
   } catch (err: unknown) {

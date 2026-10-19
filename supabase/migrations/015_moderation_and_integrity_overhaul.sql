@@ -5,12 +5,12 @@
 -- 1. Updates listings status constraint to support 'shadow_quarantined' and 'archived'
 -- 2. Aligns listing_verifications foreign key to ON DELETE CASCADE
 -- 3. Idempotently declares public.is_active_admin()
--- 4. Hardens protect_listing_security() (removes unsafe trigger depth bypass, forbids deletion with bookings/reports)
--- 5. Hardens listings DELETE and INSERT RLS policies
--- 6. Creates public.profile_reports table with RLS, triggers, and grants
--- 7. Creates public.renter_reviews table for reciprocal host-to-renter reviews
--- 8. Creates public.preliminary_feedback table for accepted booking coordination
--- 9. Creates public.duplicate_enforcements table with performance composite index
+-- 4. Creates public.duplicate_enforcements table with performance composite index
+-- 5. Hardens protect_listing_security() (removes unsafe trigger depth bypass, forbids deletion with bookings/reports)
+-- 6. Hardens listings DELETE and INSERT RLS policies
+-- 7. Creates public.profile_reports table with RLS, triggers, and grants
+-- 8. Creates public.renter_reviews table for reciprocal host-to-renter reviews
+-- 9. Creates public.preliminary_feedback table for accepted booking coordination
 -- 10. Hardens public.bookings INSERT RLS policy to require listings.status = 'available'
 -- ==============================================================================
 
@@ -54,7 +54,7 @@ RETURNS boolean
 LANGUAGE sql
 STABLE
 SECURITY DEFINER
-SET search_path = public
+SET search_path = public, pg_catalog
 AS $$
   SELECT EXISTS (
     SELECT 1 FROM public.profiles
@@ -67,13 +67,87 @@ $$;
 REVOKE EXECUTE ON FUNCTION public.is_active_admin() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.is_active_admin() TO authenticated, service_role;
 
--- ── 4. Hardened Listings Security Trigger (No Trigger-Depth Bypass) ───────────
+-- ── 4. Table: duplicate_enforcements ──────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS public.duplicate_enforcements (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id text NOT NULL,
+  strike_count integer NOT NULL DEFAULT 1 CHECK (strike_count >= 1),
+  cooldown_until timestamptz,
+  reason text NOT NULL,
+  target_asset_fingerprint text,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_duplicate_enforcements_user_id ON public.duplicate_enforcements(user_id);
+CREATE INDEX IF NOT EXISTS idx_duplicate_enforcements_user_created ON public.duplicate_enforcements(user_id, created_at DESC);
+
+ALTER TABLE public.duplicate_enforcements ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Admins can view and manage duplicate enforcements" ON public.duplicate_enforcements;
+CREATE POLICY "Admins can view and manage duplicate enforcements"
+  ON public.duplicate_enforcements FOR ALL
+  USING (public.is_active_admin())
+  WITH CHECK (public.is_active_admin());
+
+DROP POLICY IF EXISTS "Users can view own enforcements" ON public.duplicate_enforcements;
+CREATE POLICY "Users can view own enforcements"
+  ON public.duplicate_enforcements FOR SELECT
+  USING (auth.jwt() ->> 'sub' IS NOT NULL AND user_id = (auth.jwt() ->> 'sub'));
+
+CREATE OR REPLACE FUNCTION public.compute_duplicate_enforcement_strike()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_catalog
+AS $$
+DECLARE
+  v_prior_strike integer;
+BEGIN
+  -- Concurrency serialization: Acquire transaction-level advisory lock on user_id hash.
+  -- hashtextextended(NEW.user_id, 0) hashes the text user_id to a 64-bit integer (bigint),
+  -- which is natively supported by pg_advisory_xact_lock(bigint).
+  -- This serializes concurrent enforcement inserts for the same user across simultaneous transactions,
+  -- ensuring cumulative strike calculation and cooldown application cannot race.
+  PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(NEW.user_id, 0));
+
+  -- Concurrency-safe cumulative calculation: compute strike_count based on user's existing records
+  SELECT COALESCE(MAX(strike_count), 0)
+  INTO v_prior_strike
+  FROM public.duplicate_enforcements
+  WHERE user_id = NEW.user_id;
+
+  NEW.strike_count := v_prior_strike + 1;
+
+  -- Automatically enforce 24-hour cooldown on strike >= 2 if not provided
+  IF NEW.strike_count >= 2 AND NEW.cooldown_until IS NULL THEN
+    NEW.cooldown_until := now() + interval '24 hours';
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_compute_duplicate_enforcement_strike ON public.duplicate_enforcements;
+CREATE TRIGGER trg_compute_duplicate_enforcement_strike
+  BEFORE INSERT ON public.duplicate_enforcements
+  FOR EACH ROW
+  EXECUTE FUNCTION public.compute_duplicate_enforcement_strike();
+
+REVOKE EXECUTE ON FUNCTION public.compute_duplicate_enforcement_strike() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.compute_duplicate_enforcement_strike() TO postgres, service_role;
+
+REVOKE ALL ON TABLE public.duplicate_enforcements FROM PUBLIC, anon, authenticated;
+GRANT SELECT ON TABLE public.duplicate_enforcements TO authenticated;
+GRANT ALL ON TABLE public.duplicate_enforcements TO postgres, service_role;
+
+-- ── 5. Hardened Listings Security Trigger (No Trigger-Depth Bypass) ───────────
 
 CREATE OR REPLACE FUNCTION public.protect_listing_security()
 RETURNS trigger
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = public
+SET search_path = public, pg_catalog
 AS $$
 DECLARE
   v_jwt_sub text;
@@ -169,7 +243,10 @@ CREATE TRIGGER trg_protect_listing_security
   FOR EACH ROW
   EXECUTE FUNCTION public.protect_listing_security();
 
--- ── 5. Listings RLS Policies (DELETE & INSERT) ────────────────────────────────
+REVOKE EXECUTE ON FUNCTION public.protect_listing_security() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.protect_listing_security() TO postgres, authenticated, service_role;
+
+-- ── 6. Listings RLS Policies (DELETE & INSERT) ────────────────────────────────
 
 -- Drop all historical listing delete policies to avoid permissive overlap
 DROP POLICY IF EXISTS "Owners can delete listing without bookings" ON public.listings;
@@ -204,7 +281,7 @@ CREATE POLICY "Listings insert policy"
     AND status IN ('available', 'pending_review', 'shadow_quarantined')
   );
 
--- ── 6. Table: profile_reports ────────────────────────────────────────────────
+-- ── 7. Table: profile_reports ────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS public.profile_reports (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -248,7 +325,9 @@ CREATE POLICY "Admins can manage profile reports"
   USING (public.is_active_admin())
   WITH CHECK (public.is_active_admin());
 
-GRANT ALL ON TABLE public.profile_reports TO postgres, anon, authenticated, service_role;
+REVOKE ALL ON TABLE public.profile_reports FROM PUBLIC, anon, authenticated;
+GRANT SELECT, INSERT ON TABLE public.profile_reports TO authenticated;
+GRANT ALL ON TABLE public.profile_reports TO postgres, service_role;
 
 DROP TRIGGER IF EXISTS trg_set_profile_reports_updated_at ON public.profile_reports;
 CREATE TRIGGER trg_set_profile_reports_updated_at
@@ -256,7 +335,7 @@ CREATE TRIGGER trg_set_profile_reports_updated_at
   FOR EACH ROW
   EXECUTE FUNCTION public.set_updated_at();
 
--- ── 7. Table: renter_reviews (Reciprocal Reviews) ─────────────────────────────
+-- ── 8. Table: renter_reviews (Reciprocal Reviews) ─────────────────────────────
 
 CREATE TABLE IF NOT EXISTS public.renter_reviews (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -304,7 +383,10 @@ CREATE POLICY "Admins can manage renter reviews"
   USING (public.is_active_admin())
   WITH CHECK (public.is_active_admin());
 
-GRANT ALL ON TABLE public.renter_reviews TO postgres, anon, authenticated, service_role;
+REVOKE ALL ON TABLE public.renter_reviews FROM PUBLIC, anon, authenticated;
+GRANT SELECT ON TABLE public.renter_reviews TO anon;
+GRANT SELECT, INSERT ON TABLE public.renter_reviews TO authenticated;
+GRANT ALL ON TABLE public.renter_reviews TO postgres, service_role;
 
 DROP TRIGGER IF EXISTS trg_set_renter_reviews_updated_at ON public.renter_reviews;
 CREATE TRIGGER trg_set_renter_reviews_updated_at
@@ -312,7 +394,7 @@ CREATE TRIGGER trg_set_renter_reviews_updated_at
   FOR EACH ROW
   EXECUTE FUNCTION public.set_updated_at();
 
--- ── 8. Table: preliminary_feedback (Accepted Booking Coordination) ─────────────
+-- ── 9. Table: preliminary_feedback (Accepted Booking Coordination) ─────────────
 
 CREATE TABLE IF NOT EXISTS public.preliminary_feedback (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -355,76 +437,9 @@ CREATE POLICY "Admins can manage preliminary feedback"
   USING (public.is_active_admin())
   WITH CHECK (public.is_active_admin());
 
-GRANT ALL ON TABLE public.preliminary_feedback TO postgres, anon, authenticated, service_role;
-
--- ── 9. Table: duplicate_enforcements ──────────────────────────────────────────
-
-CREATE TABLE IF NOT EXISTS public.duplicate_enforcements (
-  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id text NOT NULL,
-  strike_count integer NOT NULL DEFAULT 1 CHECK (strike_count >= 1),
-  cooldown_until timestamptz,
-  reason text NOT NULL,
-  target_asset_fingerprint text,
-  created_at timestamptz NOT NULL DEFAULT now()
-);
-
-CREATE INDEX IF NOT EXISTS idx_duplicate_enforcements_user_id ON public.duplicate_enforcements(user_id);
-CREATE INDEX IF NOT EXISTS idx_duplicate_enforcements_user_created ON public.duplicate_enforcements(user_id, created_at DESC);
-
-ALTER TABLE public.duplicate_enforcements ENABLE ROW LEVEL SECURITY;
-
-DROP POLICY IF EXISTS "Admins can view and manage duplicate enforcements" ON public.duplicate_enforcements;
-CREATE POLICY "Admins can view and manage duplicate enforcements"
-  ON public.duplicate_enforcements FOR ALL
-  USING (public.is_active_admin())
-  WITH CHECK (public.is_active_admin());
-
-DROP POLICY IF EXISTS "Users can view own enforcements" ON public.duplicate_enforcements;
-CREATE POLICY "Users can view own enforcements"
-  ON public.duplicate_enforcements FOR SELECT
-  USING (auth.jwt() ->> 'sub' IS NOT NULL AND user_id = (auth.jwt() ->> 'sub'));
-
-CREATE OR REPLACE FUNCTION public.compute_duplicate_enforcement_strike()
-RETURNS trigger
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path = public, pg_catalog
-AS $$
-DECLARE
-  v_prior_strike integer;
-BEGIN
-  -- Concurrency serialization: Acquire transaction-level advisory lock on user_id hash.
-  -- hashtextextended(NEW.user_id, 0) hashes the text user_id to a 64-bit integer (bigint),
-  -- which is natively supported by pg_advisory_xact_lock(bigint).
-  -- This serializes concurrent enforcement inserts for the same user across simultaneous transactions,
-  -- ensuring cumulative strike calculation and cooldown application cannot race.
-  PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(NEW.user_id, 0));
-
-  -- Concurrency-safe cumulative calculation: compute strike_count based on user's existing records
-  SELECT COALESCE(MAX(strike_count), 0)
-  INTO v_prior_strike
-  FROM public.duplicate_enforcements
-  WHERE user_id = NEW.user_id;
-
-  NEW.strike_count := v_prior_strike + 1;
-
-  -- Automatically enforce 24-hour cooldown on strike >= 2 if not provided
-  IF NEW.strike_count >= 2 AND NEW.cooldown_until IS NULL THEN
-    NEW.cooldown_until := now() + interval '24 hours';
-  END IF;
-
-  RETURN NEW;
-END;
-$$;
-
-DROP TRIGGER IF EXISTS trg_compute_duplicate_enforcement_strike ON public.duplicate_enforcements;
-CREATE TRIGGER trg_compute_duplicate_enforcement_strike
-  BEFORE INSERT ON public.duplicate_enforcements
-  FOR EACH ROW
-  EXECUTE FUNCTION public.compute_duplicate_enforcement_strike();
-
-GRANT ALL ON TABLE public.duplicate_enforcements TO postgres, anon, authenticated, service_role;
+REVOKE ALL ON TABLE public.preliminary_feedback FROM PUBLIC, anon, authenticated;
+GRANT SELECT, INSERT ON TABLE public.preliminary_feedback TO authenticated;
+GRANT ALL ON TABLE public.preliminary_feedback TO postgres, service_role;
 
 -- ── 10. Harden Bookings INSERT RLS Policy ─────────────────────────────────────
 
@@ -443,5 +458,26 @@ CREATE POLICY "Bookings insert policy"
         AND l.owner_id <> (auth.jwt() ->> 'sub')
     )
   );
+
+-- ── 11. Harden Reports Uniqueness and Reporter SELECT Policies ────────────────
+
+-- 11.1 Reporter SELECT RLS policy on public.listing_reports
+DROP POLICY IF EXISTS "Reporters can view own submitted reports" ON public.listing_reports;
+CREATE POLICY "Reporters can view own submitted reports"
+  ON public.listing_reports FOR SELECT
+  USING (
+    (auth.jwt() ->> 'sub' IS NOT NULL AND reporter_id = (auth.jwt() ->> 'sub'))
+    OR public.is_active_admin()
+  );
+
+-- 11.2 Partial unique index on active listing reports to prevent concurrent duplicate submissions
+CREATE UNIQUE INDEX IF NOT EXISTS idx_listing_reports_active_reporter
+  ON public.listing_reports (listing_id, reporter_id)
+  WHERE status IN ('pending', 'reviewed');
+
+-- 11.3 Partial unique index on active profile reports
+CREATE UNIQUE INDEX IF NOT EXISTS idx_profile_reports_active_reporter
+  ON public.profile_reports (target_user_id, reporter_id)
+  WHERE status IN ('pending', 'under_review');
 
 COMMIT;

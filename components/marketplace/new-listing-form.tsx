@@ -1,5 +1,6 @@
 "use client";
 
+// [IMPORT] React core hooks, Clerk browser auth, Lucide icons, and UI primitives.
 import * as React from "react";
 import Image from "next/image";
 import Link from "next/link";
@@ -25,6 +26,7 @@ import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 import { createListingAction } from "@/app/listings/actions";
 import type { CategoryRow, AttributeFieldSchema } from "@/lib/supabase/types";
 
+// [FUNC] Helper function to initialize dynamic attributes based on category JSON schema.
 function getInitialAttributes(schema: AttributeFieldSchema[]): Record<string, unknown> {
   const initialAttrs: Record<string, unknown> = {};
   schema.forEach((field) => {
@@ -39,11 +41,13 @@ function getInitialAttributes(schema: AttributeFieldSchema[]): Record<string, un
   return initialAttrs;
 }
 
+// [TYPE] + [PROPS] Interface specifying props passed from the server page into the new listing form.
 interface NewListingFormProps {
   categories: CategoryRow[];
   userId: string;
 }
 
+// [TYPE] Interface representing an uploaded or previewed equipment image.
 interface ImageUploadItem {
   id: string;
   file?: File;
@@ -51,20 +55,29 @@ interface ImageUploadItem {
   isPrimary: boolean;
 }
 
+// [FUNC] + [PROPS] Primary equipment creation form component.
 export function NewListingForm({ categories, userId }: NewListingFormProps) {
+  // [AUTH] Hook providing function to fetch fresh Clerk session tokens for Supabase.
   const { getToken } = useAuth();
 
   // Basic Form State
+  // [STATE] Controlled input state for listing title.
   const [title, setTitle] = React.useState("");
+  // [STATE] Selected equipment category ID.
   const [categoryId, setCategoryId] = React.useState(categories[0]?.id || "");
+  // [STATE] Description text state.
   const [description, setDescription] = React.useState("");
+  // [STATE] Daily rental rate string state.
   const [price, setPrice] = React.useState("");
   const [priceUnit, setPriceUnit] = React.useState("per day");
   const [deposit, setDeposit] = React.useState("");
+  // [STATE] Physical equipment location.
   const [location, setLocation] = React.useState("");
+  // [STATE] Machinery Serial, VIN, or Unit Identifier.
   const [assetIdentifier, setAssetIdentifier] = React.useState("");
 
   // Dynamic Category Attribute Fields
+  // [STATE] Key-value dictionary storing category-specific specifications (e.g. engine horsepower, tonnage).
   const [dynamicAttributes, setDynamicAttributes] = React.useState<Record<string, unknown>>(() => {
     const initialCat = categories[0] || null;
     const initialSchema = Array.isArray(initialCat?.attribute_schema)
@@ -74,16 +87,21 @@ export function NewListingForm({ categories, userId }: NewListingFormProps) {
   });
 
   // Image Uploads State
+  // [STATE] Array of staged equipment images with previews.
   const [images, setImages] = React.useState<ImageUploadItem[]>([]);
   const [externalImageUrl, setExternalImageUrl] = React.useState("");
 
   // Submission State
+  // [STATE] Loading state during upload and database submission.
   const [isSubmitting, setIsSubmitting] = React.useState(false);
+  // [STATE] Form error message display.
   const [submitError, setSubmitError] = React.useState<string | null>(null);
   const [duplicateListingId, setDuplicateListingId] = React.useState<string | null>(null);
+  // [STATE] Stores newly created listing UUID on success to display confirmation view.
   const [createdListingId, setCreatedListingId] = React.useState<string | null>(null);
 
   // Active Category Object & Schema
+  // [METHOD] Memoize active category object so attribute form fields update when category changes.
   const activeCategory = React.useMemo(() => {
     return categories.find((c) => c.id === categoryId) || categories[0] || null;
   }, [categories, categoryId]);
@@ -265,12 +283,25 @@ export function NewListingForm({ categories, userId }: NewListingFormProps) {
         return;
       }
 
-      // 1. Upload files to Supabase Storage bucket 'listing-images'
+      // 1. Upload files to Supabase Storage bucket 'listing-images' and compute stable content hashes
       const uploadedImageUrls: string[] = [];
+      const imageHashes: string[] = [];
 
       for (const item of images) {
         if (item.file) {
           try {
+            // Compute stable SHA-256 content hash of image bytes to detect duplicates across uploads
+            try {
+              const arrayBuffer = await item.file.arrayBuffer();
+              const hashBuffer = await crypto.subtle.digest("SHA-256", arrayBuffer);
+              const hashHex = Array.from(new Uint8Array(hashBuffer))
+                .map((b) => b.toString(16).padStart(2, "0"))
+                .join("");
+              imageHashes.push(hashHex);
+            } catch (hashErr) {
+              console.warn("[image-hash] Content hashing warning:", hashErr);
+            }
+
             const fileExt = item.file.name.split(".").pop() || "jpg";
             const filePath = `${userId}/${Date.now()}_${Math.random().toString(36).substring(2, 8)}.${fileExt}`;
 
@@ -351,6 +382,7 @@ export function NewListingForm({ categories, userId }: NewListingFormProps) {
         ...dynamicAttributes,
         security_deposit: deposit ? Number(deposit) : 0,
         price_unit: priceUnit,
+        image_hashes: imageHashes,
       };
 
       // 2. Publish listing through authoritative server action with duplicate physical item prevention
