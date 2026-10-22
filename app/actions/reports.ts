@@ -3,6 +3,7 @@
 import { auth } from "@clerk/nextjs/server";
 import { revalidatePath } from "next/cache";
 import { createSupabaseServerClient, createSupabaseServiceClient } from "@/lib/supabase/server";
+import { verifyAdminSession } from "@/lib/auth/admin";
 
 export interface SubmitReportInput {
   targetType: "listing" | "profile";
@@ -255,39 +256,17 @@ export async function updateReportStatusAction(
   newStatus: "under_review" | "resolved" | "dismissed" | "escalated",
   adminNotes?: string
 ) {
-  const { userId, sessionClaims } = await auth();
+  const { userId } = await auth();
   if (!userId) {
     return { error: "Authentication required.", code: "AUTH_REQUIRED" };
   }
 
   try {
-    const supabase = await createSupabaseServerClient();
-    const publicMeta = sessionClaims?.publicMetadata as Record<string, unknown> | undefined;
-    const customMeta = sessionClaims?.metadata as Record<string, unknown> | undefined;
-    let isAdmin = publicMeta?.role === "admin" || customMeta?.role === "admin";
-    let adminEmail =
-      (sessionClaims?.email as string) ||
-      (sessionClaims?.primaryEmail as string) ||
-      null;
-
-    if (!isAdmin || !adminEmail) {
-      const { data: profile } = await supabase
-        .from("profiles")
-        .select("role, email")
-        .eq("clerk_user_id", userId)
-        .maybeSingle();
-
-      if (profile?.role === "admin") {
-        isAdmin = true;
-      }
-      if (profile?.email) {
-        adminEmail = profile.email;
-      }
-    }
-
-    if (!isAdmin) {
+    const authResult = await verifyAdminSession();
+    if (!authResult.authorized) {
       return { error: "Unauthorized: Administrator access required.", code: "UNAUTHORIZED" };
     }
+    const adminEmail = authResult.adminEmail;
 
     const serviceClient = createSupabaseServiceClient();
 

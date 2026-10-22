@@ -4,7 +4,7 @@ import { User, Calendar, ChevronRight } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { StarRating } from "./star-rating";
-import type { PublicListerProfile, ListerReviewSummary, ListerReviewSummary } from "@/lib/supabase/lister-reviews";
+import type { PublicListerProfile, ListerReviewSummary } from "@/lib/supabase/lister-reviews";
 import { format, parseISO } from "date-fns";
 
 interface ListerProfileCardProps {

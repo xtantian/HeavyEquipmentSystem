@@ -3,6 +3,7 @@
 import { auth, clerkClient } from "@clerk/nextjs/server";
 import { revalidatePath } from "next/cache";
 import { createSupabaseServiceClient, createSupabaseServerClient } from "@/lib/supabase/server";
+import { verifyAdminSession } from "@/lib/auth/admin";
 import type { ListingStatus, UserAccountStatus, Json } from "@/lib/supabase/types";
 
 /**
@@ -19,48 +20,20 @@ async function getAdminActionClient() {
 
 /**
  * Verifies that the caller is authenticated and holds administrator privileges.
- * Checks both Clerk publicMetadata and Supabase profiles table, and enforces active account status.
+ * Delegates to the shared authoritative verifyAdminSession helper.
  */
 async function verifyAdminCaller() {
-  const { userId, sessionClaims } = await auth();
-  if (!userId) {
+  const authResult = await verifyAdminSession();
+  if (!authResult.userId) {
     throw new Error("Unauthorized: Authentication required");
   }
-
-  // Use authenticated server client to inspect profile within caller's own permissions
-  const supabase = await createSupabaseServerClient();
-  const { data: profile, error } = await supabase
-    .from("profiles")
-    .select("email, role, status")
-    .eq("clerk_user_id", userId)
-    .maybeSingle();
-
-  if (error) {
-    console.warn("[verifyAdminCaller] Profile lookup notice:", error.message);
+  if (!authResult.authorized) {
+    throw new Error(authResult.reason || "Unauthorized: Administrator privileges required");
   }
-
-  // Active status check: Inactive, banned, restricted, or deleted accounts CANNOT exercise admin privileges
-  if (profile?.status && profile.status !== "active") {
-    throw new Error(`Unauthorized: Administrator account is ${profile.status}`);
-  }
-
-  const publicMeta = sessionClaims?.publicMetadata as Record<string, unknown> | undefined;
-  const customMeta = sessionClaims?.metadata as Record<string, unknown> | undefined;
-  const isAdminInClerk = publicMeta?.role === "admin" || customMeta?.role === "admin";
-  const isAdminInProfile = profile?.role === "admin";
-
-  if (!isAdminInClerk && !isAdminInProfile) {
-    throw new Error("Unauthorized: Administrator privileges required");
-  }
-
-  const primaryEmail =
-    profile?.email ||
-    (sessionClaims?.email as string) ||
-    null;
 
   return {
-    adminId: userId,
-    adminEmail: primaryEmail,
+    adminId: authResult.userId,
+    adminEmail: authResult.adminEmail,
   };
 }
 

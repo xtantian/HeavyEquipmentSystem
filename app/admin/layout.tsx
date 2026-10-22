@@ -5,6 +5,7 @@ import { Navbar } from "@/components/landing/navbar";
 import { Footer } from "@/components/landing/footer";
 import { AdminNav } from "@/components/admin/admin-nav";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { verifyAdminSession } from "@/lib/auth/admin";
 
 export const dynamic = "force-dynamic";
 
@@ -18,44 +19,21 @@ export default async function AdminLayout({
 }: {
   children: React.ReactNode;
 }) {
-  // 1. Strict Server-Side Role-Based Access Control (RBAC) via fast local JWT claims
-  const { userId, sessionClaims } = await auth();
+  // 1. Strict Server-Side Role-Based Access Control (RBAC) via fast local JWT claims & authoritative Clerk verification
+  const { userId } = await auth();
   if (!userId) {
     redirect("/sign-in?redirect_url=/admin");
   }
 
-  // Pre-create Supabase server client once for both role verification and badge count
-  const supabase = await createSupabaseServerClient();
-
-  const publicMeta = sessionClaims?.publicMetadata as Record<string, unknown> | undefined;
-  const customMeta = sessionClaims?.metadata as Record<string, unknown> | undefined;
-  let isAdmin = publicMeta?.role === "admin" || customMeta?.role === "admin";
-
-  if (!isAdmin) {
-    // Check Supabase profiles role as mirror fallback
-    try {
-      const { data: profile } = await supabase
-        .from("profiles")
-        .select("role")
-        .eq("clerk_user_id", userId)
-        .maybeSingle();
-
-      if (profile?.role === "admin") {
-        isAdmin = true;
-      }
-    } catch (err) {
-      console.warn("[AdminLayout] Error verifying profile role:", err);
-    }
-  }
-
-  // Reject non-admin access immediately at server level
-  if (!isAdmin) {
+  const authResult = await verifyAdminSession();
+  if (!authResult.authorized) {
     redirect("/");
   }
 
-  // 2. Fetch active reports count for navigation badge using the existing client
+  // 2. Fetch active reports count for navigation badge
   let pendingReportsCount = 0;
   try {
+    const supabase = await createSupabaseServerClient();
     const { count } = await supabase
       .from("listing_reports")
       .select("*", { count: "exact", head: true })
