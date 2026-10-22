@@ -78,7 +78,9 @@ export function getSupabasePublishableKey(): string | undefined {
 export function getSupabaseServiceKey(): string | undefined {
   return (
     process.env.SUPABASE_KEY_SECRET ||
-    process.env.SUPABASE_SERVICE_ROLE_KEY
+    process.env.SUPABASE_SERVICE_ROLE_KEY ||
+    process.env.SUPABASE_KEY_ROLE ||
+    process.env.SUPABASE_SERVICE_KEY
   );
 }
 

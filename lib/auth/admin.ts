@@ -1,7 +1,8 @@
 import "server-only";
 
+import https from "https";
 import { auth, clerkClient } from "@clerk/nextjs/server";
-import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { createSupabaseServerClient, createSupabaseServiceClient } from "@/lib/supabase/server";
 import type { UserAccountStatus } from "@/lib/supabase/types";
 
 export interface AdminAuthResult {
@@ -11,6 +12,58 @@ export interface AdminAuthResult {
   status: UserAccountStatus | null;
   reason?: string;
   source?: "clerk_claims" | "clerk_backend_api";
+}
+
+/**
+ * Direct HTTPS fallback to api.clerk.com for environments where undici global fetch
+ * encounters socket reset errors (e.g. ECONNRESET on Windows Node runtime).
+ * Strictly maintains fail-closed behavior, timeout bounds, and authenticates via CLERK_SECRET_KEY.
+ */
+function fetchClerkUserDirect(
+  userId: string,
+  secretKey: string
+): Promise<{ publicMetadata?: Record<string, unknown>; emailAddresses?: Array<{ emailAddress: string }> }> {
+  return new Promise((resolve, reject) => {
+    const req = https.get(
+      {
+        hostname: "api.clerk.com",
+        path: `/v1/users/${encodeURIComponent(userId)}`,
+        headers: {
+          Authorization: `Bearer ${secretKey}`,
+          "User-Agent": "rentit-admin/1.0",
+          Accept: "application/json",
+        },
+      },
+      (res) => {
+        let body = "";
+        res.on("data", (chunk) => (body += chunk));
+        res.on("end", () => {
+          if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
+            try {
+              const parsed = JSON.parse(body);
+              resolve({
+                publicMetadata: parsed.public_metadata || parsed.publicMetadata || {},
+                emailAddresses:
+                  parsed.email_addresses?.map((e: { email_address: string }) => ({
+                    emailAddress: e.email_address,
+                  })) || [],
+              });
+            } catch (jsonErr) {
+              reject(jsonErr);
+            }
+          } else {
+            const err = new Error(`Clerk Backend API returned HTTP ${res.statusCode}`);
+            (err as Error & { status?: number }).status = res.statusCode;
+            reject(err);
+          }
+        });
+      }
+    );
+    req.on("error", reject);
+    req.setTimeout(8000, () => {
+      req.destroy(new Error("Clerk Backend API connection timed out"));
+    });
+  });
 }
 
 /**
@@ -34,6 +87,27 @@ function extractRoleFromClaims(claims: Record<string, unknown> | null | undefine
     return snakeMeta.role;
   }
   return undefined;
+}
+
+/**
+ * Safely formats diagnostic error details from a Clerk Backend API exception.
+ * Redacts tokens, credentials, and personal data while preserving status codes and error names.
+ */
+function formatSafeClerkError(err: unknown): string {
+  if (!err) return "Unknown error";
+  if (err instanceof Error) {
+    const errorWithStatus = err as Error & { status?: number; statusCode?: number };
+    const status = errorWithStatus.status || errorWithStatus.statusCode;
+    const statusStr = status ? ` (HTTP ${status})` : "";
+    const cleanMsg = err.message
+      .replace(/(bearer|key|token|secret)\s*[:=\s]\s*\S+/gi, "$1 [REDACTED]")
+      .replace(/(?:sk_|pk_|whsec_|eyJ)[a-zA-Z0-9_\-.]+/g, "[REDACTED_CREDENTIAL]");
+    return `${err.name}${statusStr}: ${cleanMsg}`;
+  }
+  if (typeof err === "object" && err !== null && "status" in err) {
+    return `HTTP ${(err as { status: unknown }).status}`;
+  }
+  return String(err);
 }
 
 /**
@@ -108,6 +182,21 @@ export async function verifyAdminSession(): Promise<AdminAuthResult> {
   // 2. Step A: Fast-path local JWT session claims check (if configured in Clerk session token template)
   const claimsRole = extractRoleFromClaims(sessionClaims as Record<string, unknown>);
   if (claimsRole === "admin") {
+    // Synchronize Supabase profile role if needed to resolve Clerk/Supabase mismatch
+    if (profileRole && profileRole !== "admin") {
+      try {
+        const serviceClient = createSupabaseServiceClient();
+        await serviceClient
+          .from("profiles")
+          .update({ role: "admin", updated_at: new Date().toISOString() })
+          .eq("clerk_user_id", userId);
+        console.info(
+          `[admin-auth] Synchronized Supabase profile role to 'admin' for user ${userId} via validated session claims.`
+        );
+      } catch (syncErr) {
+        console.warn("[admin-auth] Profile role sync notice:", (syncErr as Error).message);
+      }
+    }
     return {
       authorized: true,
       userId,
@@ -120,33 +209,69 @@ export async function verifyAdminSession(): Promise<AdminAuthResult> {
   // 3. Step B: Authoritative Clerk Backend API lookup
   // Clerk public metadata is authoritative. Stale Supabase profile roles cannot grant access.
   try {
-    const client = await clerkClient();
-    const clerkUser = await client.users.getUser(userId);
+    let clerkUser: {
+      publicMetadata?: Record<string, unknown>;
+      emailAddresses?: Array<{ emailAddress: string }>;
+    } | null = null;
+
+    try {
+      const client = await clerkClient();
+      clerkUser = await client.users.getUser(userId);
+    } catch (sdkErr: unknown) {
+      // If global fetch failed (e.g. Node 24 on Windows undici TLS socket reset),
+      // fallback to resilient direct HTTPS request to api.clerk.com with fail-closed semantics
+      const clerkSecret = process.env.CLERK_SECRET_KEY;
+      if (clerkSecret) {
+        clerkUser = await fetchClerkUserDirect(userId, clerkSecret);
+      } else {
+        throw sdkErr;
+      }
+    }
+
     const clerkPublicMeta = clerkUser?.publicMetadata as Record<string, unknown> | undefined;
     const clerkRole = clerkPublicMeta?.role;
 
     if (clerkRole === "admin") {
+      // Fix Clerk/Supabase authorization mismatch: ensure database profile reflects verified admin role
       if (profileRole && profileRole !== "admin") {
-        console.info(
-          `[admin-auth] Disagreement resolved: User ${userId} holds admin role in Clerk public metadata while Supabase profile role is '${profileRole}'. Authorized via authoritative Clerk metadata.`
-        );
+        try {
+          const serviceClient = createSupabaseServiceClient();
+          await serviceClient
+            .from("profiles")
+            .update({ role: "admin", updated_at: new Date().toISOString() })
+            .eq("clerk_user_id", userId);
+          console.info(
+            `[admin-auth] Disagreement resolved & synced: User ${userId} holds admin role in Clerk public metadata. Synchronized Supabase profile role from '${profileRole}' to 'admin'.`
+          );
+        } catch (syncErr) {
+          console.warn("[admin-auth] Profile role sync notice:", (syncErr as Error).message);
+        }
       }
       return {
         authorized: true,
         userId,
-        adminEmail: primaryEmail || clerkUser.emailAddresses[0]?.emailAddress || null,
+        adminEmail: primaryEmail || clerkUser?.emailAddresses?.[0]?.emailAddress || null,
         status: profileStatus,
         source: "clerk_backend_api",
       };
     }
 
     if (profileRole === "admin") {
+      // Demote stale database profile if Clerk authoritative metadata confirms caller is not admin
+      try {
+        const serviceClient = createSupabaseServiceClient();
+        await serviceClient
+          .from("profiles")
+          .update({ role: "customer", updated_at: new Date().toISOString() })
+          .eq("clerk_user_id", userId);
+      } catch {}
       console.warn(
-        `[admin-auth] Disagreement rejected: User ${userId} has stale profile role 'admin' in Supabase, but authoritative Clerk metadata has role '${clerkRole || "none"}'. Access denied.`
+        `[admin-auth] Disagreement rejected: User ${userId} has stale profile role 'admin' in Supabase, but authoritative Clerk metadata has role '${clerkRole || "none"}'. Access denied and profile demoted.`
       );
     }
-  } catch {
-    console.warn("[admin-auth] Clerk Backend API verification failed (fail-closed)");
+  } catch (err: unknown) {
+    const safeError = formatSafeClerkError(err);
+    console.warn(`[admin-auth] Clerk Backend API verification failed (fail-closed): ${safeError}`);
     return {
       authorized: false,
       userId,

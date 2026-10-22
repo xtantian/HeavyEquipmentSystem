@@ -14,6 +14,9 @@ import {
   Image as ImageIcon,
   Layers,
   Flag,
+  CheckCircle2,
+  XCircle,
+  Clock,
 } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -34,6 +37,8 @@ import {
   restrictListingAction,
   restoreListingAction,
   softDeleteListingAction,
+  approveListingAction,
+  declineListingAction,
 } from "@/app/admin/actions";
 import { AdminConfirmDialog } from "@/components/admin/admin-confirm-dialog";
 
@@ -55,7 +60,7 @@ export function AdminListingsTable({ initialListings }: AdminListingsTableProps)
   // Confirmation Dialog States
   const [confirmDialog, setConfirmDialog] = React.useState<{
     open: boolean;
-    type: "restrict" | "delete" | "restore";
+    type: "restrict" | "delete" | "restore" | "approve" | "decline";
     item: MarketplaceListingItem | null;
     reason: string;
     loading: boolean;
@@ -115,10 +120,19 @@ export function AdminListingsTable({ initialListings }: AdminListingsTableProps)
         (item.category?.name && item.category.name.toLowerCase().includes(searchQuery.toLowerCase()));
 
       let matchesStatus = true;
+      const attrs = (item.attributes || {}) as Record<string, unknown>;
+      const isRejected = item.status === "restricted" && attrs.moderation_status === "rejected";
+
       if (statusFilter === "reported") {
         matchesStatus = Boolean(item.is_reported || item.report_reason);
       } else if (statusFilter === "duplicates") {
         matchesStatus = potentialDuplicateIds.has(item.id);
+      } else if (statusFilter === "pending_review") {
+        matchesStatus = item.status === "pending_review" || item.status === "shadow_quarantined";
+      } else if (statusFilter === "rejected") {
+        matchesStatus = isRejected;
+      } else if (statusFilter === "restricted") {
+        matchesStatus = item.status === "restricted" && !isRejected;
       } else if (statusFilter !== "all") {
         matchesStatus = item.status === statusFilter;
       }
@@ -127,21 +141,67 @@ export function AdminListingsTable({ initialListings }: AdminListingsTableProps)
     });
   }, [listings, searchQuery, statusFilter, potentialDuplicateIds]);
 
-  // Execute confirmed actions
+  // Execute confirmed actions (with automatic rollback on failure)
   const handleConfirmAction = async () => {
     const { type, item, reason } = confirmDialog;
     if (!item) return;
 
     setConfirmDialog((prev) => ({ ...prev, loading: true }));
+    const previousListings = listings;
 
     try {
-      if (type === "restrict") {
+      if (type === "approve") {
+        // Optimistic update
+        setListings((prev) =>
+          prev.map((l) => (l.id === item.id ? { ...l, status: "available" as ListingStatus, is_verified: true } : l))
+        );
+        const res = await approveListingAction(item.id, {
+          resolveQuarantine: item.status === "shadow_quarantined",
+        });
+        if (res.error) {
+          setListings(previousListings);
+          showNotification(res.error, "error");
+        } else {
+          showNotification(`Listing "${item.title}" approved and live on marketplace.`, "success");
+        }
+      } else if (type === "decline") {
+        const trimmedReason = reason.trim();
+        if (!trimmedReason) {
+          showNotification("A reason is required to decline a listing.", "error");
+          setConfirmDialog((prev) => ({ ...prev, loading: false }));
+          return;
+        }
+        // Optimistic update
+        setListings((prev) =>
+          prev.map((l) =>
+            l.id === item.id
+              ? {
+                  ...l,
+                  status: "restricted" as ListingStatus,
+                  attributes: {
+                    ...((l.attributes as Record<string, unknown>) || {}),
+                    moderation_status: "rejected",
+                    rejection_reason: trimmedReason,
+                  },
+                }
+              : l
+          )
+        );
+        const res = await declineListingAction(item.id, trimmedReason);
+        if (res.error) {
+          setListings(previousListings);
+          showNotification(res.error, "error");
+        } else {
+          showNotification(`Listing "${item.title}" declined. Rejection reason recorded.`, "success");
+        }
+      } else if (type === "restrict") {
         // Optimistic update
         setListings((prev) =>
           prev.map((l) => (l.id === item.id ? { ...l, status: "restricted" as ListingStatus, report_reason: reason } : l))
         );
         const res = await restrictListingAction(item.id, reason);
         if (res.error) {
+          setListings(previousListings);
           showNotification(res.error, "error");
         } else {
           showNotification(`Listing "${item.title}" is now restricted and hidden from public browse.`, "success");
@@ -153,6 +213,7 @@ export function AdminListingsTable({ initialListings }: AdminListingsTableProps)
         );
         const res = await restoreListingAction(item.id);
         if (res.error) {
+          setListings(previousListings);
           showNotification(res.error, "error");
         } else {
           showNotification(`Listing "${item.title}" has been restored to available status.`, "success");
@@ -164,12 +225,14 @@ export function AdminListingsTable({ initialListings }: AdminListingsTableProps)
         );
         const res = await softDeleteListingAction(item.id, reason);
         if (res.error) {
+          setListings(previousListings);
           showNotification(res.error, "error");
         } else {
           showNotification(`Listing "${item.title}" soft-deleted. Historical rental records remain preserved.`, "success");
         }
       }
     } catch (err: unknown) {
+      setListings(previousListings);
       showNotification((err as Error).message || "Operation failed", "error");
     } finally {
       setConfirmDialog({
@@ -182,7 +245,7 @@ export function AdminListingsTable({ initialListings }: AdminListingsTableProps)
     }
   };
 
-  const renderStatusBadge = (status: string, isReported?: boolean) => {
+  const renderStatusBadge = (status: string, isReported?: boolean, attributes?: unknown) => {
     if (isReported) {
       return (
         <Badge variant="destructive" className="gap-1 text-[11px] font-semibold">
@@ -191,11 +254,22 @@ export function AdminListingsTable({ initialListings }: AdminListingsTableProps)
       );
     }
 
+    const attrs = (attributes || {}) as Record<string, unknown>;
+    const isRejected = status === "restricted" && attrs.moderation_status === "rejected";
+
+    if (isRejected) {
+      return (
+        <Badge className="bg-rose-600 hover:bg-rose-700 text-white gap-1 text-[11px] font-semibold">
+          <XCircle className="h-3 w-3" /> Rejected
+        </Badge>
+      );
+    }
+
     switch (status) {
       case "available":
         return (
-          <Badge className="bg-emerald-600 text-white text-[11px] font-semibold">
-            Available
+          <Badge className="bg-emerald-600 text-white gap-1 text-[11px] font-semibold">
+            <CheckCircle2 className="h-3 w-3" /> Available
           </Badge>
         );
       case "rented":
@@ -217,9 +291,10 @@ export function AdminListingsTable({ initialListings }: AdminListingsTableProps)
           </Badge>
         );
       case "pending_review":
+      case "shadow_quarantined":
         return (
-          <Badge variant="secondary" className="text-[11px] font-semibold">
-            Pending Review
+          <Badge variant="outline" className="border-amber-500/50 bg-amber-500/10 text-amber-600 gap-1 text-[11px] font-semibold">
+            <Clock className="h-3 w-3" /> Pending Review
           </Badge>
         );
       case "deleted":
@@ -282,11 +357,16 @@ export function AdminListingsTable({ initialListings }: AdminListingsTableProps)
             className="h-9 rounded-lg border border-border bg-background px-3 text-xs font-semibold text-foreground shadow-sm focus:outline-none focus:ring-2 focus:ring-primary cursor-pointer"
           >
             <option value="all">All Statuses ({listings.length})</option>
-            <option value="available">Available</option>
-            <option value="restricted">Restricted / Hidden</option>
+            <option value="pending_review">
+              Pending Review ({listings.filter((l) => l.status === "pending_review" || l.status === "shadow_quarantined").length})
+            </option>
+            <option value="available">Approved / Available</option>
+            <option value="rejected">
+              Rejected ({listings.filter((l) => l.status === "restricted" && (l.attributes as Record<string, unknown>)?.moderation_status === "rejected").length})
+            </option>
+            <option value="restricted">Restricted (Policy / Flags)</option>
             <option value="reported">Reported / Flagged</option>
             <option value="duplicates">Potential Duplicates ({potentialDuplicateIds.size})</option>
-            <option value="pending_review">Pending Review</option>
             <option value="rented">Rented</option>
             <option value="maintenance">Maintenance</option>
             <option value="deleted">Soft-Deleted</option>
@@ -340,7 +420,7 @@ export function AdminListingsTable({ initialListings }: AdminListingsTableProps)
                         <span className="text-xs font-mono text-muted-foreground">
                           Owner: {item.owner_id ? `${item.owner_id.slice(0, 14)}...` : "System"}
                         </span>
-                        {renderStatusBadge(item.status, isReported)}
+                        {renderStatusBadge(item.status, isReported, item.attributes)}
                         {potentialDuplicateIds.has(item.id) && (
                           <Badge variant="outline" className="border-amber-500/40 bg-amber-500/10 text-amber-600 text-[10px] font-semibold gap-1">
                             <AlertTriangle className="h-3 w-3" />
@@ -369,10 +449,17 @@ export function AdminListingsTable({ initialListings }: AdminListingsTableProps)
                           <span>Flag Reason: {item.report_reason}</span>
                         </div>
                       )}
+
+                      {Boolean((item.attributes as Record<string, unknown>)?.rejection_reason) && (
+                        <div className="mt-1.5 flex items-center gap-1.5 rounded-lg bg-rose-500/10 px-2.5 py-1 text-xs text-rose-600 dark:text-rose-400 border border-rose-500/20">
+                          <XCircle className="h-3.5 w-3.5 shrink-0" />
+                          <span>Decline Reason: {String((item.attributes as Record<string, unknown>).rejection_reason)}</span>
+                        </div>
+                      )}
                     </div>
                   </div>
 
-                  {/* Right Actions: View, Restrict, Restore, Soft-Delete */}
+                  {/* Right Actions: View, Approve, Decline, Restrict, Restore, Soft-Delete */}
                   <div className="flex flex-wrap items-center gap-2 pt-3 lg:pt-0 border-t lg:border-t-0 border-border/60 self-start lg:self-center">
                     {/* View Details Modal Trigger */}
                     <Button
@@ -385,43 +472,88 @@ export function AdminListingsTable({ initialListings }: AdminListingsTableProps)
                       View Details
                     </Button>
 
-                    {/* Restrict or Restore */}
-                    {isRestricted || isDeleted ? (
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() =>
-                          setConfirmDialog({
-                            open: true,
-                            type: "restore",
-                            item,
-                            reason: "",
-                            loading: false,
-                          })
-                        }
-                        className="h-8 text-xs font-semibold text-emerald-600 hover:bg-emerald-50 hover:text-emerald-700 border-emerald-500/30 cursor-pointer"
-                      >
-                        <RotateCcw className="mr-1.5 h-3.5 w-3.5" />
-                        Restore Listing
-                      </Button>
-                    ) : (
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() =>
-                          setConfirmDialog({
-                            open: true,
-                            type: "restrict",
-                            item,
-                            reason: "",
-                            loading: false,
-                          })
-                        }
-                        className="h-8 text-xs font-semibold text-amber-600 hover:bg-amber-50 hover:text-amber-700 border-amber-500/30 cursor-pointer"
-                      >
-                        <ShieldAlert className="mr-1.5 h-3.5 w-3.5" />
-                        Restrict / Hide
-                      </Button>
+                    {/* Moderation Actions for Pending or Rejected Items */}
+                    {item.status === "pending_review" ||
+                    item.status === "shadow_quarantined" ||
+                    (isRestricted && (item.attributes as Record<string, unknown>)?.moderation_status === "rejected") ? (
+                      <>
+                        <Button
+                          size="sm"
+                          onClick={() =>
+                            setConfirmDialog({
+                              open: true,
+                              type: "approve",
+                              item,
+                              reason: "",
+                              loading: false,
+                            })
+                          }
+                          className="h-8 text-xs font-semibold bg-emerald-600 hover:bg-emerald-700 text-white cursor-pointer"
+                        >
+                          <CheckCircle2 className="mr-1.5 h-3.5 w-3.5" />
+                          Approve
+                        </Button>
+                        {(item.attributes as Record<string, unknown>)?.moderation_status !== "rejected" && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() =>
+                              setConfirmDialog({
+                                open: true,
+                                type: "decline",
+                                item,
+                                reason: "",
+                                loading: false,
+                              })
+                            }
+                            className="h-8 text-xs font-semibold text-rose-600 hover:bg-rose-50 border-rose-500/30 cursor-pointer"
+                          >
+                            <XCircle className="mr-1.5 h-3.5 w-3.5" />
+                            Decline
+                          </Button>
+                        )}
+                      </>
+                    ) : null}
+
+                    {/* Restrict or Restore for Active / Inactive Listings */}
+                    {item.status !== "pending_review" && item.status !== "shadow_quarantined" && (
+                      isRestricted || isDeleted ? (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() =>
+                            setConfirmDialog({
+                              open: true,
+                              type: "restore",
+                              item,
+                              reason: "",
+                              loading: false,
+                            })
+                          }
+                          className="h-8 text-xs font-semibold text-emerald-600 hover:bg-emerald-50 hover:text-emerald-700 border-emerald-500/30 cursor-pointer"
+                        >
+                          <RotateCcw className="mr-1.5 h-3.5 w-3.5" />
+                          Restore Listing
+                        </Button>
+                      ) : (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() =>
+                            setConfirmDialog({
+                              open: true,
+                              type: "restrict",
+                              item,
+                              reason: "",
+                              loading: false,
+                            })
+                          }
+                          className="h-8 text-xs font-semibold text-amber-600 hover:bg-amber-50 hover:text-amber-700 border-amber-500/30 cursor-pointer"
+                        >
+                          <ShieldAlert className="mr-1.5 h-3.5 w-3.5" />
+                          Restrict / Hide
+                        </Button>
+                      )
                     )}
 
                     {/* Soft Delete */}
@@ -489,9 +621,26 @@ export function AdminListingsTable({ initialListings }: AdminListingsTableProps)
                 </div>
                 <div>
                   <span className="text-muted-foreground block text-[11px]">Status</span>
-                  {renderStatusBadge(viewingItem.status, Boolean(viewingItem.is_reported))}
+                  {renderStatusBadge(viewingItem.status, Boolean(viewingItem.is_reported), viewingItem.attributes)}
                 </div>
               </div>
+
+              {Boolean((viewingItem.attributes as Record<string, unknown>)?.rejection_reason) && (
+                <div className="rounded-xl border border-rose-500/30 bg-rose-500/10 p-3 text-xs text-rose-700 dark:text-rose-300">
+                  <span className="font-semibold block mb-0.5">Decline Feedback (Sent to Owner):</span>
+                  {String((viewingItem.attributes as Record<string, unknown>).rejection_reason)}
+                </div>
+              )}
+
+              {potentialDuplicateIds.has(viewingItem.id) && (
+                <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-amber-700 dark:text-amber-300 flex items-start gap-2">
+                  <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
+                  <div>
+                    <span className="font-semibold block mb-0.5">Duplicate Warning:</span>
+                    This listing shares physical unit characteristics or identical title with another listing registered by the same owner.
+                  </div>
+                </div>
+              )}
 
               <div>
                 <h4 className="text-xs font-semibold text-foreground uppercase tracking-wider mb-1">
@@ -528,6 +677,54 @@ export function AdminListingsTable({ initialListings }: AdminListingsTableProps)
                   Public Listing Page <ExternalLink className="h-3 w-3" />
                 </Button>
               </Link>
+
+              {viewingItem.status === "pending_review" ||
+              viewingItem.status === "shadow_quarantined" ||
+              (viewingItem.status === "restricted" &&
+                (viewingItem.attributes as Record<string, unknown>)?.moderation_status === "rejected") ? (
+                <>
+                  <Button
+                    size="sm"
+                    onClick={() => {
+                      const item = viewingItem;
+                      setViewingItem(null);
+                      setConfirmDialog({
+                        open: true,
+                        type: "approve",
+                        item,
+                        reason: "",
+                        loading: false,
+                      });
+                    }}
+                    className="text-xs font-semibold bg-emerald-600 hover:bg-emerald-700 text-white cursor-pointer"
+                  >
+                    <CheckCircle2 className="mr-1.5 h-3.5 w-3.5" />
+                    Approve
+                  </Button>
+                  {(viewingItem.attributes as Record<string, unknown>)?.moderation_status !== "rejected" && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => {
+                        const item = viewingItem;
+                        setViewingItem(null);
+                        setConfirmDialog({
+                          open: true,
+                          type: "decline",
+                          item,
+                          reason: "",
+                          loading: false,
+                        });
+                      }}
+                      className="text-xs font-semibold text-rose-600 hover:bg-rose-50 border-rose-500/30 cursor-pointer"
+                    >
+                      <XCircle className="mr-1.5 h-3.5 w-3.5" />
+                      Decline
+                    </Button>
+                  )}
+                </>
+              ) : null}
+
               <Button size="sm" onClick={() => setViewingItem(null)} className="text-xs font-semibold">
                 Close
               </Button>
@@ -536,38 +733,56 @@ export function AdminListingsTable({ initialListings }: AdminListingsTableProps)
         </Dialog>
       )}
 
-      {/* ── Confirmation Dialog for Restrict, Restore, and Delete ── */}
+      {/* ── Confirmation Dialog for Approve, Decline, Restrict, Restore, and Delete ── */}
       <AdminConfirmDialog
         open={confirmDialog.open}
         onOpenChange={(open) => setConfirmDialog((prev) => ({ ...prev, open }))}
         title={
-          confirmDialog.type === "restrict"
+          confirmDialog.type === "approve"
+            ? "Approve & Publish Listing"
+            : confirmDialog.type === "decline"
+            ? "Decline Equipment Listing"
+            : confirmDialog.type === "restrict"
             ? "Restrict & Hide Listing"
             : confirmDialog.type === "restore"
             ? "Restore Equipment Listing"
             : "Soft-Delete Listing"
         }
         description={
-          confirmDialog.type === "restrict"
+          confirmDialog.type === "approve"
+            ? confirmDialog.item?.status === "shadow_quarantined"
+              ? `This listing was shadow-quarantined due to duplicate or anti-fraud collision signals. Confirming approval will explicitly resolve the quarantine, set status to Available, and make "${confirmDialog.item?.title}" live and bookable on the marketplace.`
+              : `Approving "${confirmDialog.item?.title}" will change its status to Available, mark it as verified, and make it bookable on the marketplace.`
+            : confirmDialog.type === "decline"
+            ? `Declining "${confirmDialog.item?.title}" will keep it hidden from public browse and provide your feedback reason to the owner so they can revise and resubmit.`
+            : confirmDialog.type === "restrict"
             ? `Restricting "${confirmDialog.item?.title}" will immediately hide it from the marketplace browse page and block new booking requests.`
             : confirmDialog.type === "restore"
             ? `Restoring "${confirmDialog.item?.title}" will clear restriction flags and make the unit active and bookable again.`
             : `Are you sure you want to soft-delete "${confirmDialog.item?.title}"? The item will be removed from marketplace browse, but past rental contracts and accounting history are preserved.`
         }
         confirmLabel={
-          confirmDialog.type === "restrict"
+          confirmDialog.type === "approve"
+            ? "Approve Listing"
+            : confirmDialog.type === "decline"
+            ? "Decline Listing"
+            : confirmDialog.type === "restrict"
             ? "Restrict Listing"
             : confirmDialog.type === "restore"
             ? "Restore to Available"
             : "Soft-Delete"
         }
         confirmVariant={
-          confirmDialog.type === "restore" ? "default" : "destructive"
+          confirmDialog.type === "approve" || confirmDialog.type === "restore" ? "default" : "destructive"
         }
         isLoading={confirmDialog.loading}
         onConfirm={handleConfirmAction}
-        requireReason={confirmDialog.type === "restrict"}
-        reasonPlaceholder="e.g., Inaccurate specs, safety complaint, or platform rule violation..."
+        requireReason={confirmDialog.type === "restrict" || confirmDialog.type === "decline"}
+        reasonPlaceholder={
+          confirmDialog.type === "decline"
+            ? "Explain why this listing was declined (e.g. blurry photos, inaccurate category, missing load certification)..."
+            : "e.g., Inaccurate specs, safety complaint, or platform rule violation..."
+        }
         reasonValue={confirmDialog.reason}
         onReasonChange={(reason) => setConfirmDialog((prev) => ({ ...prev, reason }))}
       />

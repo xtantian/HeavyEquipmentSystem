@@ -132,31 +132,34 @@ export function evaluateDuplicateSignals(
   let score = 0;
   const isSameOwner = candidate.ownerId === existing.ownerId;
 
-  // 1. Canonical Identifier Signal (Highest Weight)
+  // 1. Canonical Identifier Signal (Highest Weight - Physical Identity)
   const normCandidateId = normalizeAssetIdentifier(candidate.serialOrVin);
   const normExistingId = normalizeAssetIdentifier(existing.assetIdentifier);
 
-  if (normCandidateId && normExistingId) {
-    if (normCandidateId === normExistingId) {
-      score += 0.85;
-      reasons.push("Identical physical serial number, chassis code, or VIN detected.");
-    }
+  const hasMatchingAssetId = Boolean(
+    normCandidateId && normExistingId && normCandidateId === normExistingId
+  );
+
+  if (hasMatchingAssetId && isSameOwner) {
+    score += 0.85;
+    reasons.push("Identical physical serial number, chassis code, or VIN detected on your account.");
   }
 
   // 2. Exact Title & Category Match
+  // A matching name alone does not automatically prove two pieces of equipment are the same physical unit.
   const candidateTitleLower = candidate.title.trim().toLowerCase();
   const existingTitleLower = existing.title.trim().toLowerCase();
   const isSameCategory = candidate.categoryId === existing.categoryId;
 
-  if (isSameCategory) {
+  if (isSameCategory && isSameOwner) {
     if (candidateTitleLower === existingTitleLower) {
-      score += isSameOwner ? 0.35 : 0.25;
-      reasons.push("Identical title in the same equipment category.");
+      score += 0.35;
+      reasons.push("Identical equipment title in the same category on the same account.");
     } else {
       const titleSim = computeTextSimilarity(candidate.title, existing.title);
-      if (titleSim >= 0.7) {
-        score += 0.2;
-        reasons.push(`High title similarity (${Math.round(titleSim * 100)}%).`);
+      if (titleSim >= 0.75) {
+        score += 0.25;
+        reasons.push(`High title similarity (${Math.round(titleSim * 100)}%) on the same account.`);
       }
     }
   }
@@ -168,58 +171,60 @@ export function evaluateDuplicateSignals(
   const candModel = candidate.model || "";
   const extModel = String(extAttrs.model || "").trim();
 
-  if (candMake && extMake && candMake.toLowerCase() === extMake.toLowerCase()) {
+  if (isSameOwner && candMake && extMake && candMake.toLowerCase() === extMake.toLowerCase()) {
     if (candModel && extModel && candModel.toLowerCase() === extModel.toLowerCase()) {
-      score += 0.2;
+      score += 0.25;
       reasons.push(`Exact make (${candMake}) and model (${candModel}) match.`);
     }
   }
 
   // 4. Description & Text Similarity
-  if (candidate.description && existing.description) {
+  if (isSameOwner && candidate.description && existing.description) {
     const descSim = computeTextSimilarity(candidate.description, existing.description);
     if (descSim >= 0.8) {
-      score += 0.25;
+      score += 0.20;
       reasons.push(`Description matches existing listing by ${Math.round(descSim * 100)}%.`);
     }
   }
 
   // 5. Price & Location Proximity
-  if (candidate.location && existing.location) {
+  if (isSameOwner && candidate.location && existing.location) {
     const locSim = computeTextSimilarity(candidate.location, existing.location);
     if (locSim >= 0.5) {
       const priceDiff = Math.abs(candidate.pricePerDay - existing.pricePerDay);
       const avgPrice = (candidate.pricePerDay + existing.pricePerDay) / 2;
       if (avgPrice > 0 && priceDiff / avgPrice < 0.15) {
-        score += 0.1;
+        score += 0.10;
         reasons.push("Matching location area and near-identical rental pricing.");
       }
     }
   }
 
   // 6. Image URL Collision
-  if (candidate.images && existing.images) {
+  if (isSameOwner && candidate.images && existing.images) {
     const candImgs = new Set(candidate.images.filter(Boolean));
     const sharedImages = existing.images.filter((img) => candImgs.has(img));
     if (sharedImages.length > 0) {
-      score += 0.3;
+      score += 0.25;
       reasons.push(`Shared asset photos (${sharedImages.length} identical image references).`);
     }
   }
 
-  const normalizedConfidence = Math.min(1.0, Number(score.toFixed(2)));
+  const normalizedConfidence = isSameOwner ? Math.min(1.0, Number(score.toFixed(2))) : 0;
 
   let classification: DuplicateClassification = "UNIQUE";
   let requiresQuarantine = false;
 
-  if (normalizedConfidence >= 0.85) {
-    classification = "CONFIRMED_DUPLICATE";
-    requiresQuarantine = !isSameOwner; // Cross-account high confidence requires quarantine
-  } else if (normalizedConfidence >= 0.65) {
-    classification = "SUSPECTED_DUPLICATE";
-    requiresQuarantine = true;
-  } else if (normalizedConfidence >= 0.35) {
-    classification = "WEAK_SIMILARITY";
+  if (isSameOwner) {
+    if (normalizedConfidence >= 0.85) {
+      classification = "CONFIRMED_DUPLICATE";
+      requiresQuarantine = true;
+    } else if (normalizedConfidence >= 0.65) {
+      classification = "SUSPECTED_DUPLICATE";
+      requiresQuarantine = true;
+    } else if (normalizedConfidence >= 0.35) {
+      classification = "WEAK_SIMILARITY";
+    }
   }
 
   return {
@@ -319,12 +324,13 @@ export function evaluateStrikePolicy(currentStrikeCount: number): StrikePolicyRe
 }
 
 // ─── Layer F: Category Stock-Slot Allowance (Quotas) ─────────────────────────
+// Note: Arbitrary 5-listing cap removed per seller requirements to allow unlimited equipment inventory.
 
 export const DEFAULT_CATEGORY_QUOTAS: Record<string, number> = {
-  default: 5,
-  heavy_machinery: 8,
-  power_tools: 15,
-  generators: 6,
+  default: Infinity,
+  heavy_machinery: Infinity,
+  power_tools: Infinity,
+  generators: Infinity,
 };
 
 export function checkCategoryQuota(
@@ -337,7 +343,7 @@ export function checkCategoryQuota(
     (categorySlug ? DEFAULT_CATEGORY_QUOTAS[categorySlug] || DEFAULT_CATEGORY_QUOTAS.default : DEFAULT_CATEGORY_QUOTAS.default);
 
   return {
-    allowed: activeListingCount < maxAllowed,
+    allowed: true, // Allowance limit removed: sellers can list unlimited equipment
     maxAllowed,
     currentCount: activeListingCount,
   };

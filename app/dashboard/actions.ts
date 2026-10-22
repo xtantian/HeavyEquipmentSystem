@@ -7,13 +7,7 @@ import {
   createSupabaseServerClient,
   createSupabaseServiceClient,
 } from "@/lib/supabase/server";
-
-// [FUNC] + [PARAM] + [RETURN] Fast local JWT check inspecting Clerk session claims for admin role.
-// Avoids slow, blocking external network roundtrips to Clerk servers.
-function checkAdminClaim(sessionClaims: unknown): boolean {
-  const claims = sessionClaims as { publicMetadata?: { role?: string }; metadata?: { role?: string } } | null | undefined;
-  return claims?.publicMetadata?.role === "admin" || claims?.metadata?.role === "admin";
-}
+import { verifyAdminSession } from "@/lib/auth/admin";
 
 // [TYPE] Union type listing the exact allowed booking lifecycle statuses.
 export type UpdatableBookingStatus =
@@ -44,7 +38,7 @@ export async function updateBookingStatusAction(
   newStatus: UpdatableBookingStatus
 ) {
   // [AUTH] + [ASYNC] Retrieve active Clerk user ID and verified session claims.
-  const { userId, sessionClaims } = await auth();
+  const { userId } = await auth();
   // [IF] + [RETURN] Deny unauthenticated visitors immediately.
   if (!userId) {
     return {
@@ -86,16 +80,10 @@ export async function updateBookingStatusAction(
     const listingOwnerId = (booking.listing as unknown as { owner_id: string } | null)?.owner_id;
     const isOwner = listingOwnerId === userId;
 
-    let isAdmin = checkAdminClaim(sessionClaims);
-    if (!isAdmin && !isRenter && !isOwner) {
-      const { data: profile } = await supabase
-        .from("profiles")
-        .select("role")
-        .eq("clerk_user_id", userId)
-        .maybeSingle();
-      if (profile?.role === "admin") {
-        isAdmin = true;
-      }
+    let isAdmin = false;
+    if (!isRenter && !isOwner) {
+      const adminAuth = await verifyAdminSession();
+      isAdmin = adminAuth.authorized;
     }
 
     let isAuthorized = false;
@@ -189,7 +177,7 @@ export async function updateBookingStatusAction(
  * 4. Revalidates dashboard and marketplace routes.
  */
 export async function deleteUserListingAction(listingId: string) {
-  const { userId, sessionClaims } = await auth();
+  const { userId } = await auth();
   if (!userId) {
     return {
       error: "You must be signed in to perform this action.",
@@ -199,17 +187,6 @@ export async function deleteUserListingAction(listingId: string) {
 
   try {
     const supabase = await createSupabaseServerClient();
-    let isAdmin = checkAdminClaim(sessionClaims);
-    if (!isAdmin) {
-      const { data: profile } = await supabase
-        .from("profiles")
-        .select("role")
-        .eq("clerk_user_id", userId)
-        .maybeSingle();
-      if (profile?.role === "admin") {
-        isAdmin = true;
-      }
-    }
 
     // Verify ownership
     const { data: listing } = await supabase
@@ -222,8 +199,11 @@ export async function deleteUserListingAction(listingId: string) {
       return { error: "Listing not found.", code: "NOT_FOUND" };
     }
 
-    if (listing.owner_id !== userId && !isAdmin) {
-      return { error: "Unauthorized: You do not own this listing.", code: "UNAUTHORIZED" };
+    if (listing.owner_id !== userId) {
+      const adminAuth = await verifyAdminSession();
+      if (!adminAuth.authorized) {
+        return { error: "Unauthorized: You do not own this listing.", code: "UNAUTHORIZED" };
+      }
     }
 
     // Query all bookings to determine deletion eligibility vs archiving requirement
@@ -355,24 +335,13 @@ export async function deleteUserListingAction(listingId: string) {
  * Preserves financial, audit, and legal records while removing the listing from public marketplace and active inventory.
  */
 export async function archiveUserListingAction(listingId: string) {
-  const { userId, sessionClaims } = await auth();
+  const { userId } = await auth();
   if (!userId) {
     return { error: "You must be signed in to perform this action.", code: "AUTH_REQUIRED" };
   }
 
   try {
     const supabase = await createSupabaseServerClient();
-    let isAdmin = checkAdminClaim(sessionClaims);
-    if (!isAdmin) {
-      const { data: profile } = await supabase
-        .from("profiles")
-        .select("role")
-        .eq("clerk_user_id", userId)
-        .maybeSingle();
-      if (profile?.role === "admin") {
-        isAdmin = true;
-      }
-    }
 
     const { data: listing } = await supabase
       .from("listings")
@@ -381,8 +350,11 @@ export async function archiveUserListingAction(listingId: string) {
       .maybeSingle();
 
     if (!listing) return { error: "Listing not found.", code: "NOT_FOUND" };
-    if (listing.owner_id !== userId && !isAdmin) {
-      return { error: "Unauthorized: You do not own this listing.", code: "UNAUTHORIZED" };
+    if (listing.owner_id !== userId) {
+      const adminAuth = await verifyAdminSession();
+      if (!adminAuth.authorized) {
+        return { error: "Unauthorized: You do not own this listing.", code: "UNAUTHORIZED" };
+      }
     }
 
     // Verify no active bookings
@@ -426,7 +398,7 @@ export async function archiveUserListingAction(listingId: string) {
  * Toggles status between 'available' and 'inactive' (Not Available) with strict ownership checks.
  */
 export async function toggleListingAvailabilityAction(listingId: string) {
-  const { userId, sessionClaims } = await auth();
+  const { userId } = await auth();
   if (!userId) {
     return {
       error: "You must be signed in to perform this action.",
@@ -436,17 +408,6 @@ export async function toggleListingAvailabilityAction(listingId: string) {
 
   try {
     const supabase = await createSupabaseServerClient();
-    let isAdmin = checkAdminClaim(sessionClaims);
-    if (!isAdmin) {
-      const { data: profile } = await supabase
-        .from("profiles")
-        .select("role")
-        .eq("clerk_user_id", userId)
-        .maybeSingle();
-      if (profile?.role === "admin") {
-        isAdmin = true;
-      }
-    }
 
     // Verify listing ownership
     const { data: listing, error: fetchError } = await supabase
@@ -459,8 +420,11 @@ export async function toggleListingAvailabilityAction(listingId: string) {
       return { error: "Listing not found." };
     }
 
-    if (listing.owner_id !== userId && !isAdmin) {
-      return { error: "Unauthorized: You do not own this listing." };
+    if (listing.owner_id !== userId) {
+      const adminAuth = await verifyAdminSession();
+      if (!adminAuth.authorized) {
+        return { error: "Unauthorized: You do not own this listing." };
+      }
     }
 
     // Toggle: if currently available, switch to 'inactive' (Not Available); otherwise switch to 'available'

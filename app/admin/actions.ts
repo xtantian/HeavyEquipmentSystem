@@ -7,14 +7,24 @@ import { verifyAdminSession } from "@/lib/auth/admin";
 import type { ListingStatus, UserAccountStatus, Json } from "@/lib/supabase/types";
 
 /**
- * Resolves an administrative Supabase client.
- * Prefers the elevated service-role client; falls back to the authenticated admin server client.
+ * Resolves an authoritative administrative Supabase client.
+ * Administrative actions require the elevated service-role client to enforce
+ * verified server-side business logic and bypass database triggers restricting
+ * verification badges and moderation state transitions.
+ *
+ * Silently falling back to the authenticated user client is removed because user
+ * tokens cannot bypass database triggers or update moderation status if profiles.role
+ * is desynchronized. Instead, an explicit configuration error is raised.
  */
 async function getAdminActionClient() {
   try {
     return createSupabaseServiceClient();
-  } catch {
-    return await createSupabaseServerClient();
+  } catch (err: unknown) {
+    const errMessage = err instanceof Error ? err.message : String(err);
+    console.error("[getAdminActionClient] Service-role client initialization failed:", errMessage);
+    throw new Error(
+      "Administrative service is unavailable: service-role configuration is missing or invalid. Please check server environment settings (SUPABASE_KEY_SECRET)."
+    );
   }
 }
 
@@ -39,6 +49,7 @@ async function verifyAdminCaller() {
 
 /**
  * Log administrative operations into admin_audit_logs.
+ * Explicitly inspects the Supabase insert error and returns structured result.
  */
 async function recordAdminAudit(
   adminId: string,
@@ -47,10 +58,10 @@ async function recordAdminAudit(
   targetType: string,
   targetId: string,
   details: Record<string, unknown> = {}
-) {
+): Promise<{ success: boolean; error?: string }> {
   try {
     const supabase = await getAdminActionClient();
-    await supabase.from("admin_audit_logs").insert({
+    const { error } = await supabase.from("admin_audit_logs").insert({
       admin_id: adminId,
       admin_email: adminEmail,
       action,
@@ -59,8 +70,17 @@ async function recordAdminAudit(
       details: details as unknown as Json,
       created_at: new Date().toISOString(),
     });
+
+    if (error) {
+      console.error("[recordAdminAudit] Error inserting audit log:", error.message);
+      return { success: false, error: error.message };
+    }
+
+    return { success: true };
   } catch (err) {
-    console.warn("[recordAdminAudit] Warning logging audit:", err);
+    const msg = (err as Error).message || "Unknown audit logging error";
+    console.error("[recordAdminAudit] Exception logging audit:", msg);
+    return { success: false, error: msg };
   }
 }
 
@@ -72,9 +92,8 @@ async function recordAdminAudit(
  * Restrict or hide an equipment listing
  */
 export async function restrictListingAction(listingId: string, reason: string = "Platform rule violation review") {
-  const { adminId, adminEmail } = await verifyAdminCaller();
-
   try {
+    const { adminId, adminEmail } = await verifyAdminCaller();
     const supabase = await getAdminActionClient();
 
     const { error } = await supabase
@@ -104,9 +123,8 @@ export async function restrictListingAction(listingId: string, reason: string = 
  * Restore a restricted or deleted equipment listing back to available
  */
 export async function restoreListingAction(listingId: string) {
-  const { adminId, adminEmail } = await verifyAdminCaller();
-
   try {
+    const { adminId, adminEmail } = await verifyAdminCaller();
     const supabase = await getAdminActionClient();
 
     const { error } = await supabase
@@ -135,15 +153,338 @@ export async function restoreListingAction(listingId: string) {
 }
 
 /**
- * Soft-delete an equipment listing (sets status to 'deleted', preserving historical data)
+ * Authoritative admin action to approve a pending equipment listing for public marketplace display.
+ * Sets status to 'available', records verified metadata, and registers an administrative audit log.
+ * Enforces conditional concurrency checks, preserves report history, and blocks unverified shadow-quarantined units.
  */
-export async function softDeleteListingAction(listingId: string, reason: string = "Deleted by Administrator") {
-  const { adminId, adminEmail } = await verifyAdminCaller();
-
+export async function approveListingAction(
+  listingId: string,
+  options?: { resolveQuarantine?: boolean }
+) {
   try {
+    const { adminId, adminEmail } = await verifyAdminCaller();
     const supabase = await getAdminActionClient();
 
-    const { error } = await supabase
+    // Verify listing existence and current status
+    const { data: listing, error: fetchError } = await supabase
+      .from("listings")
+      .select("id, status, attributes, title, is_verified, verified_at, verified_by")
+      .eq("id", listingId)
+      .maybeSingle();
+
+    if (fetchError) throw new Error(fetchError.message);
+    if (!listing) return { error: "Listing not found" };
+
+    // Status Transition Guard:
+    // 1. shadow_quarantined requires explicit resolution of anti-fraud/duplicate collision
+    if (listing.status === "shadow_quarantined" && !options?.resolveQuarantine) {
+      return {
+        error:
+          "Listing is shadow-quarantined due to duplicate equipment or cross-account serial collisions. Explicit quarantine resolution confirmation is required before approval.",
+        code: "QUARANTINE_UNRESOLVED",
+      };
+    }
+
+    // 2. restricted items can ONLY be approved if they were restricted via moderation rejection
+    const existingAttrs = (listing.attributes || {}) as Record<string, unknown>;
+    if (listing.status === "restricted" && existingAttrs.moderation_status !== "rejected") {
+      return {
+        error:
+          "Listing was restricted due to safety or administrative violations, not moderation rejection. Please use 'Restore Listing' to address the underlying flag.",
+        code: "RESTRICTED_VIOLATION",
+      };
+    }
+
+    // 3. inactive items are deactivated by owner choice, not pending moderation review
+    if (listing.status === "inactive") {
+      return {
+        error:
+          "Listing is inactive by owner choice. The owner can reactivate it from their dashboard.",
+        code: "INACTIVE_OWNER_CHOICE",
+      };
+    }
+
+    const allowedStatuses: ListingStatus[] = ["pending_review", "shadow_quarantined", "restricted"];
+    if (!allowedStatuses.includes(listing.status)) {
+      return { error: `Cannot approve listing with current status '${listing.status}'` };
+    }
+
+    const updatedAttrs = {
+      ...existingAttrs,
+      moderation_status: "approved",
+      moderated_at: new Date().toISOString(),
+      moderated_by: adminId,
+      rejection_reason: null,
+      ...(listing.status === "shadow_quarantined"
+        ? {
+            quarantine_resolved: true,
+            quarantine_resolved_at: new Date().toISOString(),
+            quarantine_resolved_by: adminId,
+          }
+        : {}),
+    };
+
+    // Conditional update: must match exact current status to prevent concurrent race condition
+    const { data: updatedRows, error: updateError } = await supabase
+      .from("listings")
+      .update({
+        status: "available",
+        is_verified: true,
+        verified_at: new Date().toISOString(),
+        verified_by: adminId,
+        attributes: updatedAttrs as unknown as Json,
+        // Preserve report_reason — DO NOT clear existing user safety/report history
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", listingId)
+      .eq("status", listing.status)
+      .select("id, status");
+
+    if (updateError) throw new Error(updateError.message);
+    if (!updatedRows || updatedRows.length === 0) {
+      return {
+        error: "Conflict: This listing was modified or moderated concurrently by another administrator. Please refresh.",
+        code: "CONFLICT",
+      };
+    }
+
+    // Audit Logging with explicit failure detection & compensatory rollback
+    const auditRes = await recordAdminAudit(adminId, adminEmail, "approve_listing", "listing", listingId, {
+      previousStatus: listing.status,
+      title: listing.title,
+      quarantineResolved: listing.status === "shadow_quarantined",
+    });
+
+    if (!auditRes.success) {
+      // Compensatory rollback: restore status back to previous state to maintain audit integrity.
+      // Must match exact status = 'available' written above to prevent overwriting concurrent updates.
+      const { data: rollbackRows, error: rollbackError } = await supabase
+        .from("listings")
+        .update({
+          status: listing.status,
+          is_verified: listing.is_verified || false,
+          verified_at: listing.verified_at,
+          verified_by: listing.verified_by,
+          attributes: existingAttrs as unknown as Json,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", listingId)
+        .eq("status", "available")
+        .select("id, status");
+
+      if (rollbackError) {
+        console.error("[approveListingAction] Rollback error:", rollbackError.message);
+        return {
+          error: `Audit logging failed (${auditRes.error}), and automated compensatory rollback encountered an error: ${rollbackError.message}. Manual administrative intervention is required.`,
+          code: "ROLLBACK_FAILED",
+        };
+      }
+
+      if (!rollbackRows || rollbackRows.length === 0) {
+        console.error("[approveListingAction] Rollback conflict: 0 rows matched");
+        return {
+          error: `Audit logging failed (${auditRes.error}), and compensatory rollback was aborted because the listing was modified concurrently by another process.`,
+          code: "ROLLBACK_CONFLICT",
+        };
+      }
+
+      return {
+        error: `Audit logging failed: ${auditRes.error}. The approval was rolled back to maintain audit trail integrity.`,
+        code: "AUDIT_FAILED",
+      };
+    }
+
+    revalidatePath("/admin");
+    revalidatePath("/admin/listings");
+    revalidatePath("/listings");
+    revalidatePath(`/listings/${listingId}`);
+    revalidatePath("/dashboard");
+
+    return { success: true };
+  } catch (err: unknown) {
+    console.error("[approveListingAction] Error:", err);
+    return { error: (err as Error).message || "Failed to approve listing" };
+  }
+}
+
+/**
+ * Authoritative admin action to decline a pending equipment listing.
+ * Requires a non-empty reason. Stores moderation metadata inside attributes
+ * and sets status to 'restricted' without overwriting unrelated user report data.
+ * Enforces conditional concurrency checks and ensures audit record creation.
+ */
+export async function declineListingAction(listingId: string, reason: string) {
+  const trimmedReason = reason?.trim() || "";
+  if (!trimmedReason) {
+    return { error: "A non-empty explanation is required when declining a listing." };
+  }
+
+  try {
+    const { adminId, adminEmail } = await verifyAdminCaller();
+    const supabase = await getAdminActionClient();
+
+    // Verify listing existence and current status
+    const { data: listing, error: fetchError } = await supabase
+      .from("listings")
+      .select("id, status, attributes, title")
+      .eq("id", listingId)
+      .maybeSingle();
+
+    if (fetchError) throw new Error(fetchError.message);
+    if (!listing) return { error: "Listing not found" };
+
+    const allowedDeclineStatuses: ListingStatus[] = ["pending_review", "shadow_quarantined", "restricted"];
+    if (!allowedDeclineStatuses.includes(listing.status)) {
+      return {
+        error: `Cannot decline listing with current status '${listing.status}'. Only pending or review-candidate items can be declined.`,
+      };
+    }
+
+    const existingAttrs = (listing.attributes || {}) as Record<string, unknown>;
+    const updatedAttrs = {
+      ...existingAttrs,
+      moderation_status: "rejected",
+      rejection_reason: trimmedReason,
+      moderated_at: new Date().toISOString(),
+      moderated_by: adminId,
+    };
+
+    // Conditional update: must match exact current status
+    const { data: updatedRows, error: updateError } = await supabase
+      .from("listings")
+      .update({
+        status: "restricted",
+        attributes: updatedAttrs as unknown as Json,
+        // Preserve report_reason — DO NOT clear existing user safety/report history
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", listingId)
+      .eq("status", listing.status)
+      .select("id, status");
+
+    if (updateError) throw new Error(updateError.message);
+    if (!updatedRows || updatedRows.length === 0) {
+      return {
+        error: "Conflict: This listing was modified or moderated concurrently by another administrator. Please refresh.",
+        code: "CONFLICT",
+      };
+    }
+
+    // Audit Logging with explicit failure detection & compensatory rollback
+    const auditRes = await recordAdminAudit(adminId, adminEmail, "decline_listing", "listing", listingId, {
+      previousStatus: listing.status,
+      title: listing.title,
+      reason: trimmedReason,
+    });
+
+    if (!auditRes.success) {
+      // Compensatory rollback: restore status back to previous state to maintain audit integrity.
+      // Must match exact status = 'restricted' written above to prevent overwriting concurrent updates.
+      const { data: rollbackRows, error: rollbackError } = await supabase
+        .from("listings")
+        .update({
+          status: listing.status,
+          attributes: existingAttrs as unknown as Json,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", listingId)
+        .eq("status", "restricted")
+        .select("id, status");
+
+      if (rollbackError) {
+        console.error("[declineListingAction] Rollback error:", rollbackError.message);
+        return {
+          error: `Audit logging failed (${auditRes.error}), and automated compensatory rollback encountered an error: ${rollbackError.message}. Manual administrative intervention is required.`,
+          code: "ROLLBACK_FAILED",
+        };
+      }
+
+      if (!rollbackRows || rollbackRows.length === 0) {
+        console.error("[declineListingAction] Rollback conflict: 0 rows matched");
+        return {
+          error: `Audit logging failed (${auditRes.error}), and compensatory rollback was aborted because the listing was modified concurrently by another process.`,
+          code: "ROLLBACK_CONFLICT",
+        };
+      }
+
+      return {
+        error: `Audit logging failed: ${auditRes.error}. The decline was rolled back to maintain audit trail integrity.`,
+        code: "AUDIT_FAILED",
+      };
+    }
+
+    revalidatePath("/admin");
+    revalidatePath("/admin/listings");
+    revalidatePath("/listings");
+    revalidatePath(`/listings/${listingId}`);
+    revalidatePath("/dashboard");
+
+    return { success: true };
+  } catch (err: unknown) {
+    console.error("[declineListingAction] Error:", err);
+    return { error: (err as Error).message || "Failed to decline listing" };
+  }
+}
+
+/**
+ * Soft-delete an equipment listing (sets status to 'deleted', preserving historical data).
+ * Enforces admin authorization, validates listing state, and strictly protects equipment
+ * that is currently rented or has active/pending rental bookings.
+ */
+export async function softDeleteListingAction(listingId: string, reason: string = "Deleted by Administrator") {
+  try {
+    const { adminId, adminEmail } = await verifyAdminCaller();
+    const supabase = await getAdminActionClient();
+
+    // Verify listing existence and current status
+    const { data: listing, error: fetchError } = await supabase
+      .from("listings")
+      .select("id, status, title")
+      .eq("id", listingId)
+      .maybeSingle();
+
+    if (fetchError) throw new Error(fetchError.message);
+    if (!listing) return { error: "Listing not found", code: "NOT_FOUND" };
+
+    // Protection 1: Never delete rented equipment
+    if (listing.status === "rented") {
+      return {
+        error: "Cannot delete equipment while it is currently rented. Complete or cancel the active rental contract first.",
+        code: "ACTIVE_RENTAL",
+      };
+    }
+
+    // Protection 2: Never delete equipment with active or pending bookings
+    const { data: activeBookings, error: bookingErr } = await supabase
+      .from("bookings")
+      .select("id, status")
+      .eq("listing_id", listingId)
+      .in("status", ["pending", "accepted", "paid", "active"]);
+
+    if (bookingErr) throw new Error(bookingErr.message);
+
+    if (activeBookings && activeBookings.length > 0) {
+      return {
+        error: "Cannot delete listing with active bookings or rental contracts. Please resolve current reservations before deleting.",
+        code: "ACTIVE_BOOKINGS_EXIST",
+      };
+    }
+
+    // Protection 3: Check open moderation reports under review
+    const { data: openReports } = await supabase
+      .from("listing_reports")
+      .select("id")
+      .eq("listing_id", listingId)
+      .in("status", ["pending", "reviewed"]);
+
+    if (openReports && openReports.length > 0) {
+      return {
+        error: "Cannot delete listing while active moderation reports are under review. Please resolve pending reports first.",
+        code: "REPORTS_PENDING",
+      };
+    }
+
+    const { error: updateError } = await supabase
       .from("listings")
       .update({
         status: "deleted",
@@ -153,13 +494,19 @@ export async function softDeleteListingAction(listingId: string, reason: string 
       })
       .eq("id", listingId);
 
-    if (error) throw new Error(error.message);
+    if (updateError) throw new Error(updateError.message);
 
-    await recordAdminAudit(adminId, adminEmail, "soft_delete_listing", "listing", listingId, { reason });
+    await recordAdminAudit(adminId, adminEmail, "soft_delete_listing", "listing", listingId, {
+      previousStatus: listing.status,
+      title: listing.title,
+      reason,
+    });
 
     revalidatePath("/admin");
     revalidatePath("/admin/listings");
     revalidatePath("/listings");
+    revalidatePath(`/listings/${listingId}`);
+    revalidatePath("/dashboard");
     return { success: true };
   } catch (err: unknown) {
     return { error: (err as Error).message || "Failed to delete listing" };
@@ -177,9 +524,8 @@ export async function deleteListingAdminAction(listingId: string) {
  * Update listing status (generic admin action)
  */
 export async function updateListingStatusAdminAction(listingId: string, newStatus: ListingStatus) {
-  const { adminId, adminEmail } = await verifyAdminCaller();
-
   try {
+    const { adminId, adminEmail } = await verifyAdminCaller();
     const supabase = await getAdminActionClient();
 
     const { error } = await supabase
@@ -207,9 +553,8 @@ export async function updateListingStatusAdminAction(listingId: string, newStatu
  * Dismiss or resolve a listing violation report
  */
 export async function dismissReportAction(reportId: string, listingId?: string) {
-  const { adminId, adminEmail } = await verifyAdminCaller();
-
   try {
+    const { adminId, adminEmail } = await verifyAdminCaller();
     const supabase = await getAdminActionClient();
 
     await supabase
@@ -247,9 +592,8 @@ export async function updateUserAccountStatusAction(
   newStatus: UserAccountStatus,
   reason: string = ""
 ) {
-  const { adminId, adminEmail } = await verifyAdminCaller();
-
   try {
+    const { adminId, adminEmail } = await verifyAdminCaller();
     const supabase = await getAdminActionClient();
 
     // 1. Update status in Supabase profiles
@@ -377,22 +721,22 @@ export async function inviteAdminAction(email: string): Promise<{
   email?: string;
   error?: string;
 }> {
-  // 1. Verify caller has active administrator privileges
-  const { adminId, adminEmail } = await verifyAdminCaller();
-  const callerStatus = await checkCallerAccountStatus();
-  if (!callerStatus.allowed || callerStatus.status !== "active") {
-    return { error: "Unauthorized: Only active administrators can invite administrators." };
-  }
-
-  // 2. Validate email
-  const trimmed = email?.trim() || "";
-  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-  if (!trimmed || !emailRegex.test(trimmed)) {
-    return { error: "Please provide a valid email address." };
-  }
-  const normalizedEmail = trimmed.toLowerCase();
-
   try {
+    // 1. Verify caller has active administrator privileges
+    const { adminId, adminEmail } = await verifyAdminCaller();
+    const callerStatus = await checkCallerAccountStatus();
+    if (!callerStatus.allowed || callerStatus.status !== "active") {
+      return { error: "Unauthorized: Only active administrators can invite administrators." };
+    }
+
+    // 2. Validate email
+    const trimmed = email?.trim() || "";
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!trimmed || !emailRegex.test(trimmed)) {
+      return { error: "Please provide a valid email address." };
+    }
+    const normalizedEmail = trimmed.toLowerCase();
+
     const supabase = await getAdminActionClient();
 
     // 3. Check if user is already an administrator
@@ -481,7 +825,15 @@ export async function getAdminInvitationsAction(): Promise<{
   invitations: AdminInvitationItem[];
   error?: string;
 }> {
-  await verifyAdminCaller();
+  try {
+    await verifyAdminCaller();
+  } catch (err: unknown) {
+    return {
+      success: false,
+      invitations: [],
+      error: (err as Error).message || "Unauthorized: Administrator verification unavailable",
+    };
+  }
 
   try {
     const supabase = await getAdminActionClient();
@@ -524,13 +876,13 @@ export async function revokeAdminInvitationAction(invitationId: string): Promise
   success: boolean;
   error?: string;
 }> {
-  const { adminId, adminEmail } = await verifyAdminCaller();
-  const callerStatus = await checkCallerAccountStatus();
-  if (!callerStatus.allowed || callerStatus.status !== "active") {
-    return { success: false, error: "Unauthorized: Only active administrators can revoke invitations." };
-  }
-
   try {
+    const { adminId, adminEmail } = await verifyAdminCaller();
+    const callerStatus = await checkCallerAccountStatus();
+    if (!callerStatus.allowed || callerStatus.status !== "active") {
+      return { success: false, error: "Unauthorized: Only active administrators can revoke invitations." };
+    }
+
     // 1. Revoke in Clerk
     try {
       const client = await clerkClient();

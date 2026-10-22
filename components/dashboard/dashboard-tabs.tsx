@@ -24,19 +24,25 @@ import {
   Power,
   MessageSquare,
   AlertTriangle,
+  RotateCcw,
 } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+import { Label } from "@/components/ui/label";
 import { formatCurrency, calculateInclusiveRentalDays } from "@/lib/utils";
 import type { DashboardBookingItem } from "@/lib/supabase/marketplace";
 import type { MarketplaceListingItem } from "@/lib/marketplace/mock-listings";
+import type { ListingStatus } from "@/lib/supabase/types";
 import {
   updateBookingStatusAction,
   deleteUserListingAction,
   archiveUserListingAction,
   toggleListingAvailabilityAction,
 } from "@/app/dashboard/actions";
+import { resubmitListingAction } from "@/app/listings/actions";
 import { WriteListerReviewModal, type ReviewModalMode } from "@/components/reviews/write-lister-review-modal";
 import { BookingChatModal } from "@/components/dashboard/booking-chat-modal";
 
@@ -101,6 +107,17 @@ export function DashboardTabs({
     title: string;
     renterName: string;
   } | null>(null);
+
+  // Accessible Resubmission Modal state for editing rejected listings
+  const [resubmittingListing, setResubmittingListing] = React.useState<{
+    id: string;
+    title: string;
+    description: string;
+    pricePerDay: string;
+    location: string;
+    rejectionReason: string;
+  } | null>(null);
+  const [isResubmitting, setIsResubmitting] = React.useState(false);
 
   // Loading indicator map for action buttons
   const [loadingActions, setLoadingActions] = React.useState<Record<string, boolean>>({});
@@ -172,6 +189,24 @@ export function DashboardTabs({
 
   // Helper for Listing Lifecycle status in Active listings
   const getListingStateInfo = (item: MarketplaceListingItem) => {
+    const attrs = (item.attributes || {}) as Record<string, unknown>;
+    const isRejected = item.status === "restricted" && attrs.moderation_status === "rejected";
+
+    if (isRejected) {
+      return {
+        label: "Rejected",
+        badge: (
+          <Badge className="bg-rose-600 hover:bg-rose-700 text-white font-semibold text-[11px] px-2 py-0.5">
+            <XCircle className="mr-1 h-3 w-3" />
+            Rejected
+          </Badge>
+        ),
+        isAvailable: false,
+        isRejected: true,
+        rejectionReason: String(attrs.rejection_reason || ""),
+      };
+    }
+
     if (item.status === "inactive" || item.status === "maintenance" || item.status === "restricted") {
       return {
         label: "Not Available",
@@ -182,6 +217,7 @@ export function DashboardTabs({
           </Badge>
         ),
         isAvailable: false,
+        isRejected: false,
       };
     }
     if (item.status === "pending_review" || item.has_active_reservation) {
@@ -190,10 +226,11 @@ export function DashboardTabs({
         badge: (
           <Badge variant="outline" className="border-amber-500/50 bg-amber-500/10 text-amber-600 font-semibold text-[11px] px-2 py-0.5">
             <Clock className="mr-1 h-3 w-3" />
-            Pending
+            Pending Review
           </Badge>
         ),
         isAvailable: false,
+        isRejected: false,
       };
     }
     return {
@@ -205,6 +242,7 @@ export function DashboardTabs({
         </Badge>
       ),
       isAvailable: true,
+      isRejected: false,
     };
   };
 
@@ -424,6 +462,89 @@ export function DashboardTabs({
       showNotification("Failed to archive listing. Please try again.", "info");
     } finally {
       setLoadingActions((prev) => ({ ...prev, [listingId]: false }));
+    }
+  };
+
+  // Open Edit & Resubmit modal with pre-populated equipment data
+  const handleOpenResubmit = (item: MarketplaceListingItem, rejectionReason: string) => {
+    setResubmittingListing({
+      id: item.id,
+      title: item.title,
+      description: item.description || "",
+      pricePerDay: String(item.price_per_day),
+      location: item.location || "",
+      rejectionReason,
+    });
+  };
+
+  // Execute confirmed resubmission with validated user edits
+  const confirmResubmitListing = async () => {
+    if (!resubmittingListing) return;
+    const { id, title, description, pricePerDay, location } = resubmittingListing;
+
+    const trimmedTitle = title.trim();
+    if (trimmedTitle.length < 3 || trimmedTitle.length > 120) {
+      showNotification("Listing title must be between 3 and 120 characters.", "info");
+      return;
+    }
+
+    const trimmedDesc = description.trim();
+    if (trimmedDesc.length < 10 || trimmedDesc.length > 3000) {
+      showNotification("Listing description must be between 10 and 3,000 characters.", "info");
+      return;
+    }
+
+    const parsedPrice = Number(pricePerDay);
+    if (isNaN(parsedPrice) || parsedPrice <= 0 || parsedPrice > 5000000) {
+      showNotification("Daily rental price must be between ₱1 and ₱5,000,000.", "info");
+      return;
+    }
+
+    const trimmedLoc = location.trim();
+    if (trimmedLoc.length < 3) {
+      showNotification("Location must be at least 3 characters.", "info");
+      return;
+    }
+
+    setIsResubmitting(true);
+    try {
+      const res = await resubmitListingAction(id, {
+        title: trimmedTitle,
+        description: trimmedDesc,
+        pricePerDay: parsedPrice,
+        location: trimmedLoc,
+      });
+
+      if (!res.success) {
+        showNotification(res.error || "Failed to resubmit listing.", "info");
+      } else {
+        setListings((prev) =>
+          prev.map((l) =>
+            l.id === id
+              ? {
+                  ...l,
+                  title: trimmedTitle,
+                  description: trimmedDesc,
+                  price_per_day: parsedPrice,
+                  location: trimmedLoc,
+                  status: (res.status as ListingStatus) || "pending_review",
+                  attributes: {
+                    ...((l.attributes as Record<string, unknown>) || {}),
+                    moderation_status: res.status || "pending_review",
+                    rejection_reason: null,
+                  },
+                }
+              : l
+          )
+        );
+        setResubmittingListing(null);
+        showNotification(res.message || "Listing resubmitted! It is now pending moderation review.", "success");
+      }
+    } catch (err: unknown) {
+      console.error("Resubmit listing error:", err);
+      showNotification((err as Error).message || "Failed to resubmit listing.", "info");
+    } finally {
+      setIsResubmitting(false);
     }
   };
 
@@ -1006,6 +1127,13 @@ export function DashboardTabs({
                                 {item.location}
                               </p>
                             </div>
+
+                            {stateInfo.isRejected && stateInfo.rejectionReason && (
+                              <div className="mx-4 mb-3 rounded-xl border border-rose-500/30 bg-rose-500/10 p-2.5 text-xs text-rose-700 dark:text-rose-300">
+                                <span className="font-semibold block mb-0.5">Moderator Feedback:</span>
+                                {stateInfo.rejectionReason}
+                              </div>
+                            )}
                           </div>
 
                           <div className="flex flex-col gap-2 border-t border-border/60 p-4 pt-3 bg-muted/10">
@@ -1037,31 +1165,43 @@ export function DashboardTabs({
                               </div>
                             </div>
 
-                            {/* Authoritative Availability Toggle Button */}
+                            {/* Authoritative Availability Toggle or Resubmit Button */}
                             <div className="pt-2 border-t border-border/40 flex items-center justify-between text-xs">
                               <span className="text-muted-foreground">
                                 Status: <strong className="text-foreground">{stateInfo.label}</strong>
                               </span>
 
-                              <Button
-                                type="button"
-                                variant="outline"
-                                size="sm"
-                                disabled={isActionLoading}
-                                onClick={() => handleToggleAvailability(item.id)}
-                                className={`h-7 text-xs font-semibold cursor-pointer ${
-                                  item.status === "available"
-                                    ? "border-amber-500/40 text-amber-600 hover:bg-amber-500/10"
-                                    : "border-emerald-600/40 text-emerald-600 hover:bg-emerald-600/10"
-                                }`}
-                              >
-                                {isActionLoading ? (
-                                  <Loader2 className="h-3 w-3 animate-spin mr-1" />
-                                ) : (
-                                  <Power className="mr-1 h-3 w-3" />
-                                )}
-                                {item.status === "available" ? "Set Unavailable" : "Make Available"}
-                              </Button>
+                              {stateInfo.isRejected ? (
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  onClick={() => handleOpenResubmit(item, stateInfo.rejectionReason || "")}
+                                  className="h-7 text-xs font-semibold bg-rose-600 hover:bg-rose-700 text-white cursor-pointer"
+                                >
+                                  <RotateCcw className="mr-1 h-3 w-3" />
+                                  Revise & Resubmit
+                                </Button>
+                              ) : (
+                                <Button
+                                  type="button"
+                                  variant="outline"
+                                  size="sm"
+                                  disabled={isActionLoading}
+                                  onClick={() => handleToggleAvailability(item.id)}
+                                  className={`h-7 text-xs font-semibold cursor-pointer ${
+                                    item.status === "available"
+                                      ? "border-amber-500/40 text-amber-600 hover:bg-amber-500/10"
+                                      : "border-emerald-600/40 text-emerald-600 hover:bg-emerald-600/10"
+                                  }`}
+                                >
+                                  {isActionLoading ? (
+                                    <Loader2 className="h-3 w-3 animate-spin mr-1" />
+                                  ) : (
+                                    <Power className="mr-1 h-3 w-3" />
+                                  )}
+                                  {item.status === "available" ? "Set Unavailable" : "Make Available"}
+                                </Button>
+                              )}
                             </div>
                           </div>
                         </Card>
@@ -1491,6 +1631,124 @@ export function DashboardTabs({
                 className="text-xs font-semibold cursor-pointer"
               >
                 Decline Request
+              </Button>
+            </div>
+          </Card>
+        </div>
+      )}
+
+      {/* Accessible Modal: Revise & Resubmit Listing */}
+      {resubmittingListing && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 animate-in fade-in duration-200">
+          <Card className="w-full max-w-lg max-h-[90vh] overflow-y-auto rounded-2xl border border-border bg-card p-6 shadow-2xl space-y-4">
+            <div className="flex items-center gap-3 text-amber-500">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-amber-500/10 border border-amber-500/20">
+                <RotateCcw className="h-5 w-5" />
+              </div>
+              <div>
+                <h3 className="font-heading text-base font-bold text-foreground">
+                  Revise & Resubmit Listing
+                </h3>
+                <p className="text-xs text-muted-foreground">Address moderator feedback and submit for review</p>
+              </div>
+            </div>
+
+            {resubmittingListing.rejectionReason && (
+              <div className="rounded-xl border border-rose-500/30 bg-rose-500/10 p-3 text-xs text-rose-700 dark:text-rose-300">
+                <span className="font-semibold block mb-1">Moderator Feedback:</span>
+                {resubmittingListing.rejectionReason}
+              </div>
+            )}
+
+            <div className="space-y-3 pt-1">
+              <div className="space-y-1">
+                <Label htmlFor="resubmit-title" className="text-xs font-medium">Equipment Title</Label>
+                <Input
+                  id="resubmit-title"
+                  value={resubmittingListing.title}
+                  onChange={(e) =>
+                    setResubmittingListing((prev) => prev ? { ...prev, title: e.target.value } : null)
+                  }
+                  className="h-8 text-xs"
+                  placeholder="e.g., Cat 320 Hydraulic Excavator"
+                  maxLength={120}
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1">
+                  <Label htmlFor="resubmit-price" className="text-xs font-medium">Daily Rate (₱)</Label>
+                  <Input
+                    id="resubmit-price"
+                    type="number"
+                    value={resubmittingListing.pricePerDay}
+                    onChange={(e) =>
+                      setResubmittingListing((prev) => prev ? { ...prev, pricePerDay: e.target.value } : null)
+                    }
+                    className="h-8 text-xs"
+                    min={1}
+                    max={5000000}
+                  />
+                </div>
+                <div className="space-y-1">
+                  <Label htmlFor="resubmit-location" className="text-xs font-medium">Location</Label>
+                  <Input
+                    id="resubmit-location"
+                    value={resubmittingListing.location}
+                    onChange={(e) =>
+                      setResubmittingListing((prev) => prev ? { ...prev, location: e.target.value } : null)
+                    }
+                    className="h-8 text-xs"
+                    placeholder="e.g., Taguig, Metro Manila"
+                  />
+                </div>
+              </div>
+
+              <div className="space-y-1">
+                <Label htmlFor="resubmit-description" className="text-xs font-medium">Description</Label>
+                <Textarea
+                  id="resubmit-description"
+                  rows={4}
+                  value={resubmittingListing.description}
+                  onChange={(e) =>
+                    setResubmittingListing((prev) => prev ? { ...prev, description: e.target.value } : null)
+                  }
+                  className="text-xs resize-none"
+                  placeholder="Provide detailed equipment specifications, condition, and rental terms..."
+                  maxLength={3000}
+                />
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-border/40">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={isResubmitting}
+                onClick={() => setResubmittingListing(null)}
+                className="text-xs font-semibold"
+              >
+                Cancel
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                disabled={isResubmitting}
+                onClick={confirmResubmitListing}
+                className="text-xs font-semibold bg-rose-600 hover:bg-rose-700 text-white cursor-pointer"
+              >
+                {isResubmitting ? (
+                  <>
+                    <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                    Resubmitting...
+                  </>
+                ) : (
+                  <>
+                    <RotateCcw className="mr-1.5 h-3.5 w-3.5" />
+                    Resubmit for Review
+                  </>
+                )}
               </Button>
             </div>
           </Card>

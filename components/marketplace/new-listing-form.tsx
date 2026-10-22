@@ -99,6 +99,9 @@ export function NewListingForm({ categories, userId }: NewListingFormProps) {
   const [duplicateListingId, setDuplicateListingId] = React.useState<string | null>(null);
   // [STATE] Stores newly created listing UUID on success to display confirmation view.
   const [createdListingId, setCreatedListingId] = React.useState<string | null>(null);
+  const [createdListingStatus, setCreatedListingStatus] = React.useState<string | null>(null);
+  const [quarantineNotice, setQuarantineNotice] = React.useState<string | null>(null);
+  const [supersededOldTitle, setSupersededOldTitle] = React.useState<string | null>(null);
 
   // Active Category Object & Schema
   // [METHOD] Memoize active category object so attribute form fields update when category changes.
@@ -342,7 +345,14 @@ export function NewListingForm({ categories, userId }: NewListingFormProps) {
             } else {
               const failureMsg = uploadError?.message || "Storage service error.";
               console.error("[storage] Photo upload failed for file:", item.file.name, failureMsg);
-              setSubmitError(`Failed to upload photo "${item.file.name}". ${failureMsg}`);
+              const isBucketNotFound =
+                failureMsg.toLowerCase().includes("bucket") ||
+                failureMsg.toLowerCase().includes("not found") ||
+                (uploadError as unknown as { statusCode?: number })?.statusCode === 404;
+              const descriptiveError = isBucketNotFound
+                ? `Failed to upload "${item.file.name}": Storage bucket "listing-images" is not provisioned in Supabase. Please configure the bucket or use an external image URL.`
+                : `Failed to upload "${item.file.name}". ${failureMsg}`;
+              setSubmitError(descriptiveError);
               setIsSubmitting(false);
               return;
             }
@@ -383,8 +393,8 @@ export function NewListingForm({ categories, userId }: NewListingFormProps) {
         assetIdentifier: assetIdentifier.trim() || undefined,
       });
 
-      if (!result.success) {
-        setSubmitError(result.error || "Failed to publish listing.");
+      if (!result.success || !result.listingId) {
+        setSubmitError(result.error || "Failed to publish listing. No listing ID was returned.");
         if (result.duplicate && result.existingListingId) {
           setDuplicateListingId(result.existingListingId);
         }
@@ -392,8 +402,13 @@ export function NewListingForm({ categories, userId }: NewListingFormProps) {
         return;
       }
 
-      const insertedId = result.listingId || `lst_${Date.now()}`;
-      setCreatedListingId(insertedId);
+      if (result.supersededOldListingTitle) {
+        setSupersededOldTitle(result.supersededOldListingTitle);
+      }
+
+      setCreatedListingId(result.listingId);
+      setCreatedListingStatus(result.status || (result.quarantined ? "pending_review" : "available"));
+      setQuarantineNotice(result.quarantineMessage || null);
 
       // 3. Best-effort mirror into listing_images table for gallery relational indexing
       if (uploadedImageUrls.length > 0 && result.listingId) {
@@ -420,37 +435,69 @@ export function NewListingForm({ categories, userId }: NewListingFormProps) {
 
   // Success Confirmation Screen
   if (createdListingId) {
+    const isAvailable = createdListingStatus === "available";
+
     return (
       <Card className="rounded-2xl border border-border/80 bg-card p-8 sm:p-10 shadow-lg text-center animate-in fade-in duration-300">
         <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-2xl bg-emerald-500/10 text-emerald-500 mb-5">
           <CheckCircle2 className="h-9 w-9" />
         </div>
 
-        <Badge variant="outline" className="border-amber-500/30 bg-amber-500/10 text-amber-600 font-semibold px-3 py-1 text-xs">
-          Status: Pending Review
-        </Badge>
+        {isAvailable ? (
+          <Badge variant="outline" className="border-emerald-500/30 bg-emerald-500/10 text-emerald-600 font-semibold px-3 py-1 text-xs">
+            Status: Live & Available
+          </Badge>
+        ) : (
+          <Badge variant="outline" className="border-amber-500/30 bg-amber-500/10 text-amber-600 font-semibold px-3 py-1 text-xs">
+            Status: Pending Review
+          </Badge>
+        )}
 
         <h2 className="font-heading text-2xl sm:text-3xl font-bold tracking-tight text-foreground mt-4">
-          Listing Submitted for Review!
+          {isAvailable ? "Equipment Listed Successfully!" : "Listing Submitted for Review"}
         </h2>
 
         <p className="mt-2 text-sm sm:text-base text-muted-foreground max-w-lg mx-auto leading-relaxed">
-          &ldquo;{title}&rdquo; has been successfully submitted and stored with status{" "}
-          <strong className="text-foreground">pending_review</strong>. Our team will verify your specifications and activate the listing shortly.
+          {isAvailable ? (
+            <>
+              &ldquo;{title}&rdquo; is now active and publicly visible on the marketplace. Renters can view specifications and request bookings immediately.
+            </>
+          ) : (
+            quarantineNotice || (
+              <>
+                &ldquo;{title}&rdquo; was queued for verification because similar equipment attributes were detected on your account. It will become publicly visible once confirmed by operations.
+              </>
+            )
+          )}
         </p>
 
+        {supersededOldTitle && (
+          <div className="mt-4 rounded-xl border border-blue-500/30 bg-blue-500/10 p-3.5 text-xs text-blue-700 dark:text-blue-300 max-w-lg mx-auto text-left">
+            <span className="font-semibold block mb-0.5">Anti-Duplicate Protection:</span>
+            Your older duplicate listing (&ldquo;{supersededOldTitle}&rdquo;) with the same physical serial identifier was automatically crossed out (archived) so that only this new listing remains active.
+          </div>
+        )}
+
         <div className="mt-8 flex flex-wrap items-center justify-center gap-3">
-          <Link href="/listings">
+          <Link href={`/listings/${createdListingId}`}>
             <Button size="lg" className="font-semibold shadow-md">
-              Browse Listings
+              View Listing
               <ArrowRight className="ml-2 h-4 w-4" />
             </Button>
           </Link>
+          <Link href="/dashboard">
+            <Button variant="outline" size="lg" className="font-semibold">
+              Manage in Dashboard
+            </Button>
+          </Link>
           <Button
-            variant="outline"
+            variant="ghost"
             size="lg"
             onClick={() => {
               setCreatedListingId(null);
+              setCreatedListingStatus(null);
+              setQuarantineNotice(null);
+              setSupersededOldTitle(null);
               setTitle("");
               setDescription("");
               setPrice("");
@@ -459,7 +506,7 @@ export function NewListingForm({ categories, userId }: NewListingFormProps) {
               setImages([]);
             }}
           >
-            Create Another Listing
+            List Another Item
           </Button>
         </div>
       </Card>

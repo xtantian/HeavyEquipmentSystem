@@ -3,11 +3,11 @@
 // [IMPORT] Load external libraries, helper functions, and types required for this server action.
 import { auth } from "@clerk/nextjs/server";
 import { revalidatePath } from "next/cache";
-import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { createSupabaseServerClient, createSupabaseServiceClient } from "@/lib/supabase/server";
 import type { Json } from "@/lib/supabase/types";
 import {
   evaluateDuplicateSignals,
-  checkCategoryQuota,
+  normalizeAssetIdentifier,
   type DuplicateDetectionResult,
 } from "@/lib/marketplace/integrity";
 
@@ -28,12 +28,15 @@ export interface CreateListingInput {
 // It tells the user interface if the creation succeeded, was quarantined, or failed with a reason.
 export interface CreateListingResult {
   success: boolean;
-  listingId?: string;
+  listingId?: string | null;
+  status?: "available" | "pending_review" | "shadow_quarantined";
   error?: string;
   duplicate?: boolean;
   quarantined?: boolean;
   quarantineMessage?: string;
   existingListingId?: string;
+  supersededOldListingId?: string;
+  supersededOldListingTitle?: string;
   code?: "AUTH_REQUIRED" | "RESTRICTED" | "DUPLICATE_ASSET" | "INVALID_INPUT" | "ERROR";
 }
 
@@ -162,29 +165,7 @@ export async function createListingAction(
       };
     }
 
-    // 4. Category Stock-Slot Quota Enforcement
-    // [DB] Query existing non-deleted listings owned by this user in this category.
-    const { data: userCatListings } = await supabase
-      .from("listings")
-      .select("id")
-      .eq("owner_id", userId)
-      .eq("category_id", catId)
-      .not("status", "in", '("deleted","archived")');
-
-    // [DECL] + [INIT] Calculate total active listings the user currently owns in this category.
-    const activeCatCount = userCatListings?.length || 0;
-    // [FUNC] Check business rule quota limits (e.g., maximum allowable power tools or heavy equipment).
-    const quota = checkCategoryQuota(activeCatCount);
-    // [IF] + [RETURN] Stop and return an error if user exceeds quota.
-    if (!quota.allowed) {
-      return {
-        success: false,
-        error: `You have reached the maximum active equipment allowance (${quota.maxAllowed}) for this category. Please manage your existing inventory or upgrade your account tier.`,
-        code: "INVALID_INPUT",
-      };
-    }
-
-    // 5. Active Cooldown & Strike Enforcement
+    // 4. Active Cooldown & Strike Enforcement
     let latestEnforcement: { cooldown_until: string | null; strike_count: number } | null = null;
     try {
       // [DB] Query the moderation history table to inspect any previous duplicate violations.
@@ -245,16 +226,39 @@ export async function createListingAction(
       model: String(input.attributes?.model || ""),
     };
 
-    // [DB] Fetch recent active marketplace listings to compare candidate against.
-    const { data: existingCandidates } = await supabase
+    // [DB] Fetch user's own active listings specifically to guarantee same-account duplicate detection
+    const { data: userOwnListings } = await supabase
       .from("listings")
-      .select("id, title, description, category_id, price_per_day, location, owner_id, asset_identifier, attributes, images")
-      .not("status", "in", '("deleted","archived")')
-      .limit(60);
+      .select("id, status, title, description, category_id, price_per_day, location, owner_id, asset_identifier, attributes, images")
+      .eq("owner_id", userId)
+      .not("status", "in", '("deleted","archived")');
+
+    // Duplicate detection is strictly scoped to the same authenticated seller's inventory.
+    // Cross-seller comparisons for duplicate blocking or quarantining are strictly disallowed.
+    const existingCandidates = userOwnListings || [];
+
+    // Strict Same-Seller Name Uniqueness Enforcement:
+    // If the seller already has an active listing with that exact or normalized name (e.g., "Lamborghini"),
+    // creation is completely aborted before any database write. It results in null and is never posted.
+    const normalizedNewTitle = trimmedTitle.toLowerCase().replace(/\s+/g, " ");
+    const existingSameNameListing = existingCandidates.find(
+      (ext) => ext.title.trim().toLowerCase().replace(/\s+/g, " ") === normalizedNewTitle
+    );
+
+    if (existingSameNameListing) {
+      return {
+        success: false,
+        listingId: null,
+        duplicate: true,
+        existingListingId: existingSameNameListing.id,
+        code: "DUPLICATE_ASSET",
+        error: `You have already listed equipment with the name "${existingSameNameListing.title}". Duplicate listings with the same name are not permitted and cannot be posted.`,
+      };
+    }
 
     let duplicateSignal: DuplicateDetectionResult | null = null;
     // [LOOP] Iterate over existing listings in the database to detect duplicate serials, specs, or images.
-    for (const ext of existingCandidates || []) {
+    for (const ext of existingCandidates) {
       // [FUNC] Run domain scoring algorithm comparing candidate vs existing record.
       const signal = evaluateDuplicateSignals(candidateProfile, {
         id: ext.id,
@@ -276,30 +280,24 @@ export async function createListingAction(
       }
     }
 
-    // Exact physical asset match for same owner -> block with direct resolution link
-    // [IF] + [RETURN] Same user trying to relist the same equipment -> reject with link to manage existing.
-    if (duplicateSignal?.classification === "CONFIRMED_DUPLICATE" && duplicateSignal.isSameOwner) {
-      return {
-        success: false,
-        duplicate: true,
-        existingListingId: duplicateSignal.existingListingId,
-        code: "DUPLICATE_ASSET",
-        error: `You already have an active listing for this physical item ("${duplicateSignal.existingListingTitle || trimmedTitle}"). Please manage or edit your existing listing instead of creating another one.`,
-      };
-    }
-
-    // Quarantine suspect items or cross-account collisions
-    // [DECL] Default status is 'available', but suspect cross-account serials are quarantined for review.
-    let initialStatus: "available" | "shadow_quarantined" = "available";
+    // 6. Conditional Publishing Workflow:
+    // No qualifying duplicate: Listing publishes immediately as 'available'
+    // Qualifying same-seller duplicate: Created in supported review/quarantine state ('pending_review' or 'shadow_quarantined')
+    let initialStatus: "available" | "pending_review" | "shadow_quarantined" = "available";
     let isQuarantined = false;
     let quarantineMsg: string | undefined;
 
-    // [IF] Check if the integrity evaluation requires administrative shadow quarantine.
-    if (duplicateSignal?.requiresQuarantine) {
-      initialStatus = "shadow_quarantined";
+    const isQualifyingDuplicate =
+      duplicateSignal !== null &&
+      duplicateSignal.isSameOwner &&
+      (duplicateSignal.classification === "CONFIRMED_DUPLICATE" ||
+        duplicateSignal.classification === "SUSPECTED_DUPLICATE");
+
+    if (isQualifyingDuplicate && duplicateSignal) {
+      initialStatus = duplicateSignal.classification === "CONFIRMED_DUPLICATE" ? "shadow_quarantined" : "pending_review";
       isQuarantined = true;
       quarantineMsg =
-        "Your listing has been submitted and queued for verification because similar equipment attributes were detected. It will become publicly visible once confirmed by operations.";
+        "Your listing has been submitted and queued for verification because similar equipment attributes were detected on your account. It will become publicly visible once confirmed by operations.";
 
       try {
         const currentStrikes = latestEnforcement?.strike_count || 0;
@@ -390,6 +388,78 @@ export async function createListingAction(
       };
     }
 
+    // 8. Safe Post-Creation Duplicate Auto-Archive
+    // Defers archiving until AFTER insertion succeeds to prevent corrupting older listings on failure.
+    // Safe explicit rule: Archiving only occurs when there is an explicit identical physical asset identifier
+    // (VIN, serial number, chassis number). Matching names or similar attributes alone NEVER auto-archive existing inventory.
+    let supersededOldListingId: string | undefined;
+    let supersededOldListingTitle: string | undefined;
+
+    const normCandidateSerial = normalizeAssetIdentifier(rawAssetIdentifier);
+
+    if (
+      duplicateSignal?.classification === "CONFIRMED_DUPLICATE" &&
+      duplicateSignal.isSameOwner &&
+      duplicateSignal.existingListingId &&
+      normCandidateSerial !== null // Strict requirement: must have a physical asset identifier
+    ) {
+      const duplicateIdsToArchive = (userOwnListings || [])
+        .filter((ext) => {
+          const normExtSerial = normalizeAssetIdentifier(ext.asset_identifier);
+          return normExtSerial !== null && normExtSerial === normCandidateSerial;
+        })
+        .map((ext) => ext.id);
+
+      if (duplicateIdsToArchive.length > 0) {
+        supersededOldListingId = duplicateSignal.existingListingId;
+        supersededOldListingTitle = duplicateSignal.existingListingTitle || trimmedTitle;
+
+        const targetArchiveIds = duplicateIdsToArchive;
+
+        try {
+          // Query active/pending reservations to protect currently booked inventory
+          const { data: busyBookings } = await supabase
+            .from("bookings")
+            .select("listing_id")
+            .in("listing_id", targetArchiveIds)
+            .in("status", ["pending", "accepted", "paid", "active"]);
+
+          const busyListingIds = new Set((busyBookings || []).map((b) => b.listing_id));
+
+          // Filter out rented listings and listings with active reservations
+          const safeArchiveIds = targetArchiveIds.filter((id) => {
+            const extRecord = (userOwnListings || []).find((l) => l.id === id);
+            const isRented = extRecord?.status === "rented";
+            const hasActiveReservation = busyListingIds.has(id);
+            return !isRented && !hasActiveReservation;
+          });
+
+          if (safeArchiveIds.length > 0) {
+            const { data: archivedRows, error: archiveError } = await supabase
+              .from("listings")
+              .update({
+                status: "archived",
+                updated_at: new Date().toISOString(),
+              })
+              .in("id", safeArchiveIds)
+              .eq("owner_id", userId)
+              .in("status", ["available", "pending_review", "inactive", "shadow_quarantined", "restricted"])
+              .select("id");
+
+            if (archiveError) {
+              console.warn("[createListingAction] Non-fatal archive warning for older duplicates:", archiveError.message);
+            } else if (!archivedRows || archivedRows.length === 0) {
+              console.warn("[createListingAction] Zero older duplicate rows matched archive criteria (possibly modified concurrently).");
+            }
+          } else {
+            console.info("[createListingAction] Skipped auto-archiving older duplicate listing(s) because they are rented or hold active reservations.");
+          }
+        } catch (checkErr) {
+          console.warn("[createListingAction] Non-fatal error checking reservations for duplicate archive:", checkErr);
+        }
+      }
+    }
+
     // 6. Populate listing_images relation table with ordering and deduplication
     // [DECL] + [INIT] Set data structure prevents duplicate image URLs from being inserted twice.
     const seenUrls = new Set<string>();
@@ -424,12 +494,14 @@ export async function createListingAction(
     // [METHOD] Invalidate Next.js cache so visitors immediately see new listings without stale cache.
     revalidatePath("/listings");
     revalidatePath("/dashboard");
-    revalidatePath("/dashboard/equipment");
 
     // [RETURN] Send successful response back to the client form component.
     return {
       success: true,
       listingId: inserted.id,
+      status: initialStatus,
+      supersededOldListingId,
+      supersededOldListingTitle,
       quarantined: isQuarantined,
       quarantineMessage: quarantineMsg,
     };
@@ -450,6 +522,428 @@ export async function createListingAction(
       success: false,
       error: "An unexpected error occurred while creating your listing. Please try again.",
       code: "ERROR",
+    };
+  }
+}
+
+/**
+ * Authoritative Server Action allowing an equipment owner to edit and resubmit
+ * a rejected or restricted listing back into 'pending_review' moderation queue.
+ *
+ * GUARANTEES:
+ * 1. Strict owner authentication. Non-owners CANNOT edit or resubmit.
+ * 2. Checks profile governance: blocks restricted, banned, or deleted profiles.
+ * 3. Enforces valid status transitions: only pending_review, shadow_quarantined, or restricted with moderation_status === 'rejected'.
+ * 4. Strictly validates all provided editable fields (title, description, price, location).
+ * 5. Re-evaluates duplicate signals against owner and marketplace listings.
+ * 6. Does NOT automatically approve the listing. Status is reset to 'pending_review' (or 'shadow_quarantined' if duplicate collision detected).
+ * 7. Clears previous rejection reason and records resubmission audit metadata.
+ * 8. Uses conditional database updates to eliminate race conditions.
+ */
+export async function resubmitListingAction(
+  listingId: string,
+  updatedData: Partial<CreateListingInput>
+) {
+  const { userId } = await auth();
+  if (!userId) {
+    return {
+      success: false,
+      error: "You must be signed in to resubmit a listing.",
+      code: "AUTH_REQUIRED" as const,
+    };
+  }
+
+  try {
+    const supabase = await createSupabaseServerClient();
+
+    // 1. Caller Profile Governance Check
+    const { data: userProfile, error: profileError } = await supabase
+      .from("profiles")
+      .select("status")
+      .eq("id", userId)
+      .maybeSingle();
+
+    if (profileError) {
+      console.warn("[resubmitListingAction] Profile status lookup warning:", profileError.message);
+    }
+
+    if (userProfile?.status === "restricted") {
+      return {
+        success: false,
+        error: "Your account is currently restricted from managing or resubmitting listings. Please contact support.",
+        code: "RESTRICTED" as const,
+      };
+    }
+
+    if (userProfile?.status === "banned" || userProfile?.status === "deleted") {
+      return {
+        success: false,
+        error: "Your account is suspended and cannot resubmit listings.",
+        code: "RESTRICTED" as const,
+      };
+    }
+
+    // 2. Active Cooldown & Strike Enforcement
+    try {
+      const { data: enforcements } = await supabase
+        .from("duplicate_enforcements")
+        .select("cooldown_until, strike_count")
+        .eq("user_id", userId)
+        .order("created_at", { ascending: false })
+        .limit(1);
+
+      const latestEnforcement = enforcements?.[0] || null;
+      if (latestEnforcement) {
+        if (latestEnforcement.strike_count >= 3) {
+          return {
+            success: false,
+            error: "Your account requires administrative verification before resubmitting equipment listings due to multiple duplicate violations.",
+            code: "RESTRICTED" as const,
+          };
+        }
+
+        if (latestEnforcement.cooldown_until) {
+          const cooldownTime = new Date(latestEnforcement.cooldown_until).getTime();
+          if (cooldownTime > Date.now()) {
+            return {
+              success: false,
+              error: `Your account is temporarily in a listing cooldown until ${new Date(latestEnforcement.cooldown_until).toLocaleString()} due to duplicate equipment detection.`,
+              code: "RESTRICTED" as const,
+            };
+          }
+        }
+      }
+    } catch {
+      // Non-fatal if table pending
+    }
+
+    // 3. Fetch existing listing record
+    const { data: listing, error: fetchError } = await supabase
+      .from("listings")
+      .select("id, owner_id, status, title, description, category_id, price_per_day, location, images, asset_identifier, attributes")
+      .eq("id", listingId)
+      .maybeSingle();
+
+    if (fetchError) throw new Error(fetchError.message);
+    if (!listing) {
+      return { success: false, error: "Listing not found.", code: "NOT_FOUND" as const };
+    }
+
+    // 4. Strict Ownership Verification
+    if (listing.owner_id !== userId) {
+      return {
+        success: false,
+        error: "Unauthorized: You do not own this listing.",
+        code: "UNAUTHORIZED" as const,
+      };
+    }
+
+    // 5. Status Transition Eligibility Check
+    const existingAttrs = (listing.attributes || {}) as Record<string, unknown>;
+    const isModerationRejected = listing.status === "restricted" && existingAttrs.moderation_status === "rejected";
+    const isPending = listing.status === "pending_review" || listing.status === "shadow_quarantined";
+
+    if (listing.status === "available") {
+      return {
+        success: false,
+        error: "This listing is already active and available on the marketplace.",
+        code: "INVALID_STATE" as const,
+      };
+    }
+
+    if (listing.status === "deleted" || listing.status === "archived") {
+      return {
+        success: false,
+        error: "Cannot resubmit a deleted or archived listing.",
+        code: "INVALID_STATE" as const,
+      };
+    }
+
+    if (listing.status === "restricted" && !isModerationRejected) {
+      return {
+        success: false,
+        error: "This listing was restricted due to safety or administrative violations and cannot be self-resubmitted. Please contact support.",
+        code: "RESTRICTED_VIOLATION" as const,
+      };
+    }
+
+    if (!isPending && !isModerationRejected) {
+      return {
+        success: false,
+        error: `Cannot resubmit a listing with current status '${listing.status}'.`,
+        code: "INVALID_STATE" as const,
+      };
+    }
+
+    // 6. Field Input Validation
+    const finalTitle = updatedData.title !== undefined ? updatedData.title.trim() : listing.title;
+    if (finalTitle.length < 3 || finalTitle.length > 120) {
+      return {
+        success: false,
+        error: "Listing title must be between 3 and 120 characters.",
+        code: "INVALID_INPUT" as const,
+      };
+    }
+
+    const finalDescription = updatedData.description !== undefined ? updatedData.description.trim() : (listing.description || "");
+    if (finalDescription.length < 10 || finalDescription.length > 3000) {
+      return {
+        success: false,
+        error: "Listing description must be between 10 and 3,000 characters.",
+        code: "INVALID_INPUT" as const,
+      };
+    }
+
+    const finalPrice = updatedData.pricePerDay !== undefined ? Number(updatedData.pricePerDay) : Number(listing.price_per_day);
+    if (isNaN(finalPrice) || finalPrice <= 0 || finalPrice > 5000000) {
+      return {
+        success: false,
+        error: "Daily rental price must be a valid amount between ₱1 and ₱5,000,000.",
+        code: "INVALID_INPUT" as const,
+      };
+    }
+
+    const finalLocation = updatedData.location !== undefined ? updatedData.location.trim() : (listing.location || "");
+    if (finalLocation.length < 3) {
+      return {
+        success: false,
+        error: "Location must be at least 3 characters.",
+        code: "INVALID_INPUT" as const,
+      };
+    }
+
+    const finalImages = updatedData.images && updatedData.images.length > 0
+      ? updatedData.images
+      : (listing.images && listing.images.length > 0 ? listing.images : ["/images/equipment_loader.jpg"]);
+
+    const finalRawAssetId = updatedData.assetIdentifier !== undefined
+      ? updatedData.assetIdentifier
+      : listing.asset_identifier;
+    const finalAssetId = normalizeAssetIdentifier(finalRawAssetId);
+
+    // 7. Duplicate Detection Re-Evaluation
+    const mergedAttrs = {
+      ...existingAttrs,
+      ...(updatedData.attributes || {}),
+    };
+
+    const candidateProfile = {
+      title: finalTitle,
+      description: finalDescription,
+      categoryId: listing.category_id,
+      pricePerDay: finalPrice,
+      location: finalLocation,
+      serialOrVin: finalAssetId || undefined,
+      images: finalImages,
+      ownerId: userId,
+      make: String(mergedAttrs.make || ""),
+      model: String(mergedAttrs.model || ""),
+    };
+
+    // Fetch user's other listings (excluding current listing)
+    const { data: userOtherListings } = await supabase
+      .from("listings")
+      .select("id, status, title, description, category_id, price_per_day, location, owner_id, asset_identifier, attributes, images")
+      .eq("owner_id", userId)
+      .neq("id", listingId)
+      .not("status", "in", '("deleted","archived")');
+
+    // Duplicate detection is strictly scoped to the seller's own listings
+    const comparisonCandidates = userOtherListings || [];
+
+    // Strict Same-Seller Name Uniqueness on Resubmission:
+    const normalizedResubmitTitle = finalTitle.toLowerCase().replace(/\s+/g, " ");
+    const existingSameNameOther = comparisonCandidates.find(
+      (ext) => ext.title.trim().toLowerCase().replace(/\s+/g, " ") === normalizedResubmitTitle
+    );
+
+    if (existingSameNameOther) {
+      return {
+        success: false,
+        error: `You already have an active listing with the name "${existingSameNameOther.title}". Duplicate listings with the same name are not permitted.`,
+        code: "DUPLICATE_ASSET" as const,
+      };
+    }
+
+    let duplicateSignal: DuplicateDetectionResult | null = null;
+    for (const ext of comparisonCandidates) {
+      const signal = evaluateDuplicateSignals(candidateProfile, {
+        id: ext.id,
+        title: ext.title,
+        description: ext.description || "",
+        categoryId: ext.category_id,
+        pricePerDay: ext.price_per_day,
+        location: ext.location || "",
+        ownerId: ext.owner_id,
+        assetIdentifier: ext.asset_identifier,
+        attributes: (ext.attributes || {}) as Record<string, unknown>,
+        images: ext.images || [],
+      });
+
+      if (signal.classification === "CONFIRMED_DUPLICATE" || signal.classification === "SUSPECTED_DUPLICATE") {
+        duplicateSignal = signal;
+        break;
+      }
+    }
+
+    let nextStatus: "pending_review" | "shadow_quarantined" = "pending_review";
+    if (duplicateSignal?.requiresQuarantine) {
+      nextStatus = "shadow_quarantined";
+    }
+
+    // 8. Assemble Updated Attributes & Update Payload
+    const updatedAttrs = {
+      ...mergedAttrs,
+      moderation_status: nextStatus,
+      rejection_reason: null,
+      resubmitted_at: new Date().toISOString(),
+      ...(duplicateSignal
+        ? {
+            resubmission_duplicate_warning: {
+              confidence: duplicateSignal.confidence,
+              reasons: duplicateSignal.reasons,
+              classification: duplicateSignal.classification,
+              evaluated_at: new Date().toISOString(),
+            },
+          }
+        : {}),
+    };
+
+    const updatePayload = {
+      status: nextStatus,
+      title: finalTitle,
+      description: finalDescription,
+      price_per_day: finalPrice,
+      location: finalLocation,
+      images: finalImages,
+      asset_identifier: finalAssetId,
+      is_verified: false,
+      verified_at: null,
+      verified_by: null,
+      attributes: updatedAttrs as unknown as Json,
+      updated_at: new Date().toISOString(),
+    };
+
+    // 9. Execute Conditional Update
+    // PostgreSQL RLS policy on public.listings blocks owners from updating listings with status = 'restricted'.
+    // Since this server action has verified caller identity, ownership, governance, and that
+    // moderation_status === 'rejected', we use the elevated client exclusively for this validated resubmission.
+    let updateClient = supabase;
+    if (listing.status === "restricted") {
+      try {
+        updateClient = createSupabaseServiceClient();
+      } catch (err: unknown) {
+        console.error("[resubmitListingAction] Failed to initialize service client:", err);
+        return {
+          success: false,
+          error: "Server configuration error: elevated service credentials are required to process restricted listing resubmission.",
+          code: "SERVICE_CONFIG_ERROR" as const,
+        };
+      }
+    }
+
+    // Conditional update matching listingId, owner_id, and expected status to eliminate concurrency races
+    const { data: updatedRows, error: updateError } = await updateClient
+      .from("listings")
+      .update(updatePayload)
+      .eq("id", listingId)
+      .eq("owner_id", userId)
+      .eq("status", listing.status)
+      .select("id, status");
+
+    if (updateError) throw new Error(updateError.message);
+    if (!updatedRows || updatedRows.length === 0) {
+      return {
+        success: false,
+        error: "Failed to resubmit listing: record modified concurrently or ownership mismatch.",
+        code: "CONFLICT" as const,
+      };
+    }
+
+    // 10. Safe Post-Resubmission Duplicate Auto-Archive
+    // Defers archiving until AFTER resubmission succeeds to prevent corrupting older listings on failure.
+    // Protects listings that are rented or hold active reservations.
+    const normResubmitSerial = normalizeAssetIdentifier(finalAssetId);
+    if (
+      duplicateSignal?.classification === "CONFIRMED_DUPLICATE" &&
+      duplicateSignal.isSameOwner &&
+      duplicateSignal.existingListingId &&
+      normResubmitSerial !== null
+    ) {
+      const duplicateIdsToArchive = (userOtherListings || [])
+        .filter((ext) => {
+          const normExtSerial = normalizeAssetIdentifier(ext.asset_identifier);
+          return normExtSerial !== null && normExtSerial === normResubmitSerial;
+        })
+        .map((ext) => ext.id);
+
+      if (duplicateIdsToArchive.length > 0) {
+        const targetArchiveIds = duplicateIdsToArchive;
+
+      try {
+        // Query active/pending reservations to protect currently booked inventory
+        const { data: busyBookings } = await supabase
+          .from("bookings")
+          .select("listing_id")
+          .in("listing_id", targetArchiveIds)
+          .in("status", ["pending", "accepted", "paid", "active"]);
+
+        const busyListingIds = new Set((busyBookings || []).map((b) => b.listing_id));
+
+        // Filter out rented listings and listings with active reservations
+        const safeArchiveIds = targetArchiveIds.filter((id) => {
+          const extRecord = (userOtherListings || []).find((l) => l.id === id);
+          const isRented = extRecord?.status === "rented";
+          const hasActiveReservation = busyListingIds.has(id);
+          return !isRented && !hasActiveReservation;
+        });
+
+        if (safeArchiveIds.length > 0) {
+          const { data: archivedRows, error: archiveError } = await supabase
+            .from("listings")
+            .update({
+              status: "archived",
+              updated_at: new Date().toISOString(),
+            })
+            .in("id", safeArchiveIds)
+            .eq("owner_id", userId)
+            .in("status", ["available", "pending_review", "inactive", "shadow_quarantined", "restricted"])
+            .select("id");
+
+          if (archiveError) {
+            console.warn("[resubmitListingAction] Non-fatal archive warning for older duplicates:", archiveError.message);
+          } else if (!archivedRows || archivedRows.length === 0) {
+            console.warn("[resubmitListingAction] Zero older duplicate rows matched archive criteria (possibly modified concurrently).");
+          }
+        } else {
+          console.info("[resubmitListingAction] Skipped auto-archiving older duplicate listing(s) because they are rented or hold active reservations.");
+        }
+      } catch (checkErr) {
+        console.warn("[resubmitListingAction] Non-fatal error checking reservations for duplicate archive:", checkErr);
+      }
+      }
+    }
+
+    revalidatePath("/dashboard");
+    revalidatePath("/listings");
+    revalidatePath(`/listings/${listingId}`);
+    revalidatePath("/admin/listings");
+
+    return {
+      success: true,
+      listingId,
+      status: nextStatus,
+      message:
+        nextStatus === "shadow_quarantined"
+          ? "Listing resubmitted and queued for operational verification due to similar equipment signals."
+          : "Your listing has been updated and resubmitted for moderation review.",
+    };
+  } catch (err: unknown) {
+    console.error("[resubmitListingAction] Error:", err);
+    return {
+      success: false,
+      error: (err as Error).message || "Failed to resubmit listing.",
+      code: "ERROR" as const,
     };
   }
 }

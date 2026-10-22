@@ -160,7 +160,7 @@ export async function getMarketplaceListings(
       `,
         { count: "exact" }
       )
-      .in("status", ["available", "pending_review"]);
+      .in("status", ["available"]);
 
     if (categoryId) {
       query = query.eq("category_id", categoryId);
@@ -286,6 +286,12 @@ export async function getMarketplaceListingById(
     }
   } catch (err) {
     console.error(`[supabase/marketplace] Error fetching listing ${id}:`, err);
+  }
+
+  // Never fall back to mock listings if a real UUID was requested
+  const isDemoId = id.startsWith("lst-") || id.startsWith("mock-");
+  if (!isDemoId) {
+    return null;
   }
 
   const fallback = MOCK_LISTINGS.find((item) => item.id === id);
