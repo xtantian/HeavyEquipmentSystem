@@ -5,12 +5,8 @@ import Link from "next/link";
 import {
   Flag,
   AlertTriangle,
-  CheckCircle2,
   ShieldAlert,
-  Trash2,
   ExternalLink,
-  Eye,
-  Filter,
 } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -178,7 +174,9 @@ export function AdminReportsTable({ initialReports }: AdminReportsTableProps) {
                     </div>
 
                     <h3 className="font-heading text-base sm:text-lg font-bold text-foreground">
-                      Target Listing: {r.listing_title}
+                      {r.target_type === "profile"
+                        ? `Reported Profile: ${r.listing_title}`
+                        : `Target Listing: ${r.listing_title}`}
                     </h3>
 
                     {r.details && (
@@ -194,9 +192,13 @@ export function AdminReportsTable({ initialReports }: AdminReportsTableProps) {
                   </div>
 
                   <div className="flex flex-wrap items-center gap-2 pt-3 lg:pt-0 border-t lg:border-t-0 border-border/60 self-start lg:self-center">
-                    <Link href={`/listings/${r.listing_id}`} target="_blank">
+                    <Link
+                      href={r.target_type === "profile" ? `/profile/${r.listing_id}` : `/listings/${r.listing_id}`}
+                      target="_blank"
+                    >
                       <Button variant="outline" size="sm" className="h-8 text-xs font-semibold gap-1">
-                        View Unit <ExternalLink className="h-3 w-3" />
+                        {r.target_type === "profile" ? "View Profile" : "View Unit"}{" "}
+                        <ExternalLink className="h-3 w-3" />
                       </Button>
                     </Link>
 

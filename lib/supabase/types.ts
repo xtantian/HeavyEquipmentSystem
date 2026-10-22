@@ -877,6 +877,136 @@ export interface Database {
         };
         Relationships: [];
       };
+
+      profile_reports: {
+        Row: {
+          id: string;
+          target_user_id: string;
+          reporter_id: string;
+          reporter_email: string | null;
+          reason: string;
+          details: string | null;
+          status: "pending" | "under_review" | "resolved" | "dismissed" | "escalated";
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          target_user_id: string;
+          reporter_id: string;
+          reporter_email?: string | null;
+          reason: string;
+          details?: string | null;
+          status?: "pending" | "under_review" | "resolved" | "dismissed" | "escalated";
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          id?: string;
+          target_user_id?: string;
+          reporter_id?: string;
+          reporter_email?: string | null;
+          reason?: string;
+          details?: string | null;
+          status?: "pending" | "under_review" | "resolved" | "dismissed" | "escalated";
+          created_at?: string;
+          updated_at?: string;
+        };
+        Relationships: [];
+      };
+
+      renter_reviews: {
+        Row: {
+          id: string;
+          booking_id: string;
+          reviewer_id: string;
+          renter_id: string;
+          rating: number;
+          comment: string | null;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          booking_id: string;
+          reviewer_id: string;
+          renter_id: string;
+          rating: number;
+          comment?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          id?: string;
+          booking_id?: string;
+          reviewer_id?: string;
+          renter_id?: string;
+          rating?: number;
+          comment?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Relationships: [];
+      };
+
+      preliminary_feedback: {
+        Row: {
+          id: string;
+          booking_id: string;
+          submitted_by: string;
+          communication_rating: number;
+          notes: string | null;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          booking_id: string;
+          submitted_by: string;
+          communication_rating: number;
+          notes?: string | null;
+          created_at?: string;
+        };
+        Update: {
+          id?: string;
+          booking_id?: string;
+          submitted_by?: string;
+          communication_rating?: number;
+          notes?: string | null;
+          created_at?: string;
+        };
+        Relationships: [];
+      };
+
+      duplicate_enforcements: {
+        Row: {
+          id: string;
+          user_id: string;
+          strike_count: number;
+          cooldown_until: string | null;
+          reason: string;
+          target_asset_fingerprint: string | null;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          user_id: string;
+          strike_count?: number;
+          cooldown_until?: string | null;
+          reason: string;
+          target_asset_fingerprint?: string | null;
+          created_at?: string;
+        };
+        Update: {
+          id?: string;
+          user_id?: string;
+          strike_count?: number;
+          cooldown_until?: string | null;
+          reason?: string;
+          target_asset_fingerprint?: string | null;
+          created_at?: string;
+        };
+        Relationships: [];
+      };
     };
     Views: {
       quotes: {
@@ -888,6 +1018,20 @@ export interface Database {
       is_staff_or_admin: {
         Args: Record<PropertyKey, never>;
         Returns: boolean;
+      };
+      is_admin: {
+        Args: Record<PropertyKey, never>;
+        Returns: boolean;
+      };
+      is_active_admin: {
+        Args: Record<PropertyKey, never>;
+        Returns: boolean;
+      };
+      get_or_create_booking_conversation: {
+        Args: {
+          p_booking_id: string;
+        };
+        Returns: Database["public"]["Tables"]["conversations"]["Row"];
       };
     };
     Enums: {
@@ -913,7 +1057,9 @@ export type ListingStatus =
   | "inactive"
   | "pending_review"
   | "restricted"
-  | "deleted";
+  | "deleted"
+  | "archived"
+  | "shadow_quarantined";
 
 export type UserAccountStatus = "active" | "restricted" | "banned" | "deleted";
 

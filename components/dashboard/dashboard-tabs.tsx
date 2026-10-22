@@ -22,19 +22,29 @@ import {
   Star,
   History,
   Power,
+  MessageSquare,
+  AlertTriangle,
+  RotateCcw,
 } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+import { Label } from "@/components/ui/label";
 import { formatCurrency, calculateInclusiveRentalDays } from "@/lib/utils";
 import type { DashboardBookingItem } from "@/lib/supabase/marketplace";
 import type { MarketplaceListingItem } from "@/lib/marketplace/mock-listings";
+import type { ListingStatus } from "@/lib/supabase/types";
 import {
   updateBookingStatusAction,
   deleteUserListingAction,
+  archiveUserListingAction,
   toggleListingAvailabilityAction,
 } from "@/app/dashboard/actions";
-import { WriteListerReviewModal } from "@/components/reviews/write-lister-review-modal";
+import { resubmitListingAction } from "@/app/listings/actions";
+import { WriteListerReviewModal, type ReviewModalMode } from "@/components/reviews/write-lister-review-modal";
+import { BookingChatModal } from "@/components/dashboard/booking-chat-modal";
 
 interface DashboardTabsProps {
   initialRentals: DashboardBookingItem[];
@@ -64,7 +74,50 @@ export function DashboardTabs({
   const [reviewingBooking, setReviewingBooking] = React.useState<{
     id: string;
     listerName: string;
+    mode?: ReviewModalMode;
   } | null>(null);
+
+  // Chat modal state
+  const [chattingBooking, setChattingBooking] = React.useState<{
+    id: string;
+    listingTitle: string;
+  } | null>(null);
+
+  // Accessible confirmation dialog states
+  const [deletingListing, setDeletingListing] = React.useState<{
+    id: string;
+    title: string;
+    hasActiveReservation: boolean;
+  } | null>(null);
+
+  const [archivingListing, setArchivingListing] = React.useState<{
+    id: string;
+    title: string;
+    reason: string;
+  } | null>(null);
+
+  const [cancellingBooking, setCancellingBooking] = React.useState<{
+    id: string;
+    title: string;
+    dates: string;
+  } | null>(null);
+
+  const [decliningBooking, setDecliningBooking] = React.useState<{
+    id: string;
+    title: string;
+    renterName: string;
+  } | null>(null);
+
+  // Accessible Resubmission Modal state for editing rejected listings
+  const [resubmittingListing, setResubmittingListing] = React.useState<{
+    id: string;
+    title: string;
+    description: string;
+    pricePerDay: string;
+    location: string;
+    rejectionReason: string;
+  } | null>(null);
+  const [isResubmitting, setIsResubmitting] = React.useState(false);
 
   // Loading indicator map for action buttons
   const [loadingActions, setLoadingActions] = React.useState<Record<string, boolean>>({});
@@ -136,6 +189,24 @@ export function DashboardTabs({
 
   // Helper for Listing Lifecycle status in Active listings
   const getListingStateInfo = (item: MarketplaceListingItem) => {
+    const attrs = (item.attributes || {}) as Record<string, unknown>;
+    const isRejected = item.status === "restricted" && attrs.moderation_status === "rejected";
+
+    if (isRejected) {
+      return {
+        label: "Rejected",
+        badge: (
+          <Badge className="bg-rose-600 hover:bg-rose-700 text-white font-semibold text-[11px] px-2 py-0.5">
+            <XCircle className="mr-1 h-3 w-3" />
+            Rejected
+          </Badge>
+        ),
+        isAvailable: false,
+        isRejected: true,
+        rejectionReason: String(attrs.rejection_reason || ""),
+      };
+    }
+
     if (item.status === "inactive" || item.status === "maintenance" || item.status === "restricted") {
       return {
         label: "Not Available",
@@ -146,6 +217,7 @@ export function DashboardTabs({
           </Badge>
         ),
         isAvailable: false,
+        isRejected: false,
       };
     }
     if (item.status === "pending_review" || item.has_active_reservation) {
@@ -154,10 +226,11 @@ export function DashboardTabs({
         badge: (
           <Badge variant="outline" className="border-amber-500/50 bg-amber-500/10 text-amber-600 font-semibold text-[11px] px-2 py-0.5">
             <Clock className="mr-1 h-3 w-3" />
-            Pending
+            Pending Review
           </Badge>
         ),
         isAvailable: false,
+        isRejected: false,
       };
     }
     return {
@@ -169,13 +242,30 @@ export function DashboardTabs({
         </Badge>
       ),
       isAvailable: true,
+      isRejected: false,
     };
   };
 
-  // Cancel booking action (from Renter tab)
-  const handleCancelBooking = async (bookingId: string) => {
-    if (!confirm("Are you sure you want to cancel this reservation?")) return;
+  // Cancel booking action (from Renter tab) - triggers confirmation modal
+  const handleCancelBooking = (bookingId: string) => {
+    const booking = rentals.find((b) => b.id === bookingId);
+    const listing = booking?.listing;
+    setCancellingBooking({
+      id: bookingId,
+      title: listing?.title || "Equipment Rental",
+      dates: booking
+        ? `${format(parseISO(booking.start_date), "MMM dd")} → ${format(parseISO(booking.end_date), "MMM dd, yyyy")}`
+        : "Selected dates",
+    });
+  };
 
+  // Execute confirmed cancellation (Renter tab)
+  const confirmCancelBooking = async () => {
+    if (!cancellingBooking) return;
+    const bookingId = cancellingBooking.id;
+    setCancellingBooking(null);
+
+    const previousRentals = rentals;
     setLoadingActions((prev) => ({ ...prev, [bookingId]: true }));
     try {
       setRentals((prev) =>
@@ -186,12 +276,15 @@ export function DashboardTabs({
 
       const res = await updateBookingStatusAction(bookingId, "cancelled");
       if (res.error) {
+        setRentals(previousRentals);
         showNotification(res.error, "info");
       } else {
         showNotification("Reservation cancelled successfully.", "info");
       }
     } catch (err) {
+      setRentals(previousRentals);
       console.error("Cancel booking error:", err);
+      showNotification("Failed to cancel reservation. Please try again.", "info");
     } finally {
       setLoadingActions((prev) => ({ ...prev, [bookingId]: false }));
     }
@@ -199,6 +292,7 @@ export function DashboardTabs({
 
   // Accept booking request (from Owner tab)
   const handleAcceptRequest = async (bookingId: string) => {
+    const previousIncoming = incomingBookings;
     setLoadingActions((prev) => ({ ...prev, [bookingId]: true }));
     try {
       setIncomingBookings((prev) =>
@@ -209,21 +303,38 @@ export function DashboardTabs({
 
       const res = await updateBookingStatusAction(bookingId, "accepted");
       if (res.error) {
+        setIncomingBookings(previousIncoming);
         showNotification(res.error, "info");
       } else {
         showNotification("Booking request accepted! Renter notified.", "success");
       }
     } catch (err) {
+      setIncomingBookings(previousIncoming);
       console.error("Accept request error:", err);
+      showNotification("Failed to accept booking request. Please try again.", "info");
     } finally {
       setLoadingActions((prev) => ({ ...prev, [bookingId]: false }));
     }
   };
 
-  // Decline booking request (from Owner tab)
-  const handleDeclineRequest = async (bookingId: string) => {
-    if (!confirm("Decline this booking request? The dates will be released.")) return;
+  // Decline booking request (from Owner tab) - triggers confirmation modal
+  const handleDeclineRequest = (bookingId: string) => {
+    const request = incomingBookings.find((b) => b.id === bookingId);
+    const listing = request?.listing;
+    setDecliningBooking({
+      id: bookingId,
+      title: listing?.title || "Equipment Listing",
+      renterName: request?.renter_name || "Verified Renter",
+    });
+  };
 
+  // Execute confirmed decline (Owner tab)
+  const confirmDeclineRequest = async () => {
+    if (!decliningBooking) return;
+    const bookingId = decliningBooking.id;
+    setDecliningBooking(null);
+
+    const previousIncoming = incomingBookings;
     setLoadingActions((prev) => ({ ...prev, [bookingId]: true }));
     try {
       setIncomingBookings((prev) =>
@@ -234,12 +345,15 @@ export function DashboardTabs({
 
       const res = await updateBookingStatusAction(bookingId, "cancelled");
       if (res.error) {
+        setIncomingBookings(previousIncoming);
         showNotification(res.error, "info");
       } else {
         showNotification("Booking request declined.", "info");
       }
     } catch (err) {
+      setIncomingBookings(previousIncoming);
       console.error("Decline request error:", err);
+      showNotification("Failed to decline booking request. Please try again.", "info");
     } finally {
       setLoadingActions((prev) => ({ ...prev, [bookingId]: false }));
     }
@@ -247,6 +361,7 @@ export function DashboardTabs({
 
   // Toggle listing availability action (Owner controls available <-> inactive)
   const handleToggleAvailability = async (listingId: string) => {
+    const previousListings = listings;
     setLoadingActions((prev) => ({ ...prev, [listingId]: true }));
     try {
       const currentListing = listings.find((l) => l.id === listingId);
@@ -265,13 +380,7 @@ export function DashboardTabs({
       if (res.error) {
         showNotification(res.error, "info");
         // Revert
-        setListings((prev) =>
-          prev.map((item) =>
-            item.id === listingId
-              ? { ...item, status: willBeAvailable ? "inactive" : "available" }
-              : item
-          )
-        );
+        setListings(previousListings);
       } else {
         showNotification(
           res.newStatus === "available"
@@ -281,29 +390,161 @@ export function DashboardTabs({
         );
       }
     } catch (err) {
+      setListings(previousListings);
       console.error("Toggle listing availability error:", err);
+      showNotification("Failed to update listing availability. Please try again.", "info");
     } finally {
       setLoadingActions((prev) => ({ ...prev, [listingId]: false }));
     }
   };
 
-  // Delete own listing action (from Owner tab)
-  const handleDeleteListing = async (listingId: string) => {
-    if (!confirm("Are you sure you want to remove this listing?")) return;
+  // Delete own listing action (from Owner tab) - triggers confirmation modal
+  const handleDeleteListing = (listingId: string) => {
+    const item = listings.find((l) => l.id === listingId);
+    if (!item) return;
+    setDeletingListing({
+      id: item.id,
+      title: item.title,
+      hasActiveReservation: !!item.has_active_reservation,
+    });
+  };
+
+  // Execute confirmed delete listing (Owner tab)
+  const confirmDeleteListing = async () => {
+    if (!deletingListing) return;
+    const listingId = deletingListing.id;
+    const listingTitle = deletingListing.title;
+    setDeletingListing(null);
 
     setLoadingActions((prev) => ({ ...prev, [listingId]: true }));
     try {
-      setListings((prev) => prev.filter((item) => item.id !== listingId));
       const res = await deleteUserListingAction(listingId);
-      if (res.error) {
+      if (res.code === "HISTORICAL_RECORDS_EXIST") {
+        setArchivingListing({
+          id: listingId,
+          title: listingTitle,
+          reason: res.error || "Historical rental records exist for this listing.",
+        });
+      } else if (res.error) {
         showNotification(res.error, "info");
       } else {
-        showNotification("Listing removed successfully.", "success");
+        setListings((prev) => prev.filter((item) => item.id !== listingId));
+        showNotification("Listing permanently deleted.", "success");
       }
     } catch (err) {
       console.error("Delete listing error:", err);
+      showNotification("Failed to delete listing. Please try again.", "info");
     } finally {
       setLoadingActions((prev) => ({ ...prev, [listingId]: false }));
+    }
+  };
+
+  // Execute confirmed archive listing (Owner tab for listings with historical records)
+  const confirmArchiveListing = async () => {
+    if (!archivingListing) return;
+    const listingId = archivingListing.id;
+    setArchivingListing(null);
+
+    const previousListings = listings;
+    setLoadingActions((prev) => ({ ...prev, [listingId]: true }));
+    try {
+      setListings((prev) => prev.filter((item) => item.id !== listingId));
+      const res = await archiveUserListingAction(listingId);
+      if (res.error) {
+        setListings(previousListings);
+        showNotification(res.error, "info");
+      } else {
+        showNotification("Listing safely archived. Audit history preserved.", "success");
+      }
+    } catch (err) {
+      setListings(previousListings);
+      console.error("Archive listing error:", err);
+      showNotification("Failed to archive listing. Please try again.", "info");
+    } finally {
+      setLoadingActions((prev) => ({ ...prev, [listingId]: false }));
+    }
+  };
+
+  // Open Edit & Resubmit modal with pre-populated equipment data
+  const handleOpenResubmit = (item: MarketplaceListingItem, rejectionReason: string) => {
+    setResubmittingListing({
+      id: item.id,
+      title: item.title,
+      description: item.description || "",
+      pricePerDay: String(item.price_per_day),
+      location: item.location || "",
+      rejectionReason,
+    });
+  };
+
+  // Execute confirmed resubmission with validated user edits
+  const confirmResubmitListing = async () => {
+    if (!resubmittingListing) return;
+    const { id, title, description, pricePerDay, location } = resubmittingListing;
+
+    const trimmedTitle = title.trim();
+    if (trimmedTitle.length < 3 || trimmedTitle.length > 120) {
+      showNotification("Listing title must be between 3 and 120 characters.", "info");
+      return;
+    }
+
+    const trimmedDesc = description.trim();
+    if (trimmedDesc.length < 10 || trimmedDesc.length > 3000) {
+      showNotification("Listing description must be between 10 and 3,000 characters.", "info");
+      return;
+    }
+
+    const parsedPrice = Number(pricePerDay);
+    if (isNaN(parsedPrice) || parsedPrice <= 0 || parsedPrice > 5000000) {
+      showNotification("Daily rental price must be between ₱1 and ₱5,000,000.", "info");
+      return;
+    }
+
+    const trimmedLoc = location.trim();
+    if (trimmedLoc.length < 3) {
+      showNotification("Location must be at least 3 characters.", "info");
+      return;
+    }
+
+    setIsResubmitting(true);
+    try {
+      const res = await resubmitListingAction(id, {
+        title: trimmedTitle,
+        description: trimmedDesc,
+        pricePerDay: parsedPrice,
+        location: trimmedLoc,
+      });
+
+      if (!res.success) {
+        showNotification(res.error || "Failed to resubmit listing.", "info");
+      } else {
+        setListings((prev) =>
+          prev.map((l) =>
+            l.id === id
+              ? {
+                  ...l,
+                  title: trimmedTitle,
+                  description: trimmedDesc,
+                  price_per_day: parsedPrice,
+                  location: trimmedLoc,
+                  status: (res.status as ListingStatus) || "pending_review",
+                  attributes: {
+                    ...((l.attributes as Record<string, unknown>) || {}),
+                    moderation_status: res.status || "pending_review",
+                    rejection_reason: null,
+                  },
+                }
+              : l
+          )
+        );
+        setResubmittingListing(null);
+        showNotification(res.message || "Listing resubmitted! It is now pending moderation review.", "success");
+      }
+    } catch (err: unknown) {
+      console.error("Resubmit listing error:", err);
+      showNotification((err as Error).message || "Failed to resubmit listing.", "info");
+    } finally {
+      setIsResubmitting(false);
     }
   };
 
@@ -433,8 +674,21 @@ export function DashboardTabs({
                               {listing?.category?.name || "Equipment"}
                             </span>
                             <span className="text-muted-foreground/60">•</span>
+                            {booking.listing?.owner_id ? (
+                              <Link
+                                href={`/profile/${booking.listing.owner_id}`}
+                                className="text-xs text-muted-foreground font-medium hover:text-primary hover:underline transition-colors"
+                              >
+                                Host: {booking.lister_name || "Equipment Host"}
+                              </Link>
+                            ) : (
+                              <span className="text-xs text-muted-foreground font-medium">
+                                Host: {booking.lister_name || "Equipment Host"}
+                              </span>
+                            )}
+                            <span className="text-muted-foreground/60">•</span>
                             <span className="text-[11px] font-mono text-muted-foreground">
-                              Ref: {booking.id}
+                              Ref: {booking.id.slice(0, 8)}
                             </span>
                           </div>
 
@@ -476,6 +730,45 @@ export function DashboardTabs({
                         <div className="flex items-center gap-2">
                           {renderStatusBadge(booking.status)}
 
+                          {/* Message Button for accepted/active rental lifecycle */}
+                          {["accepted", "paid", "active", "confirmed", "in_progress", "returned", "completed"].includes(booking.status) && (
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              onClick={() =>
+                                setChattingBooking({
+                                  id: booking.id,
+                                  listingTitle: listing?.title || "Rental Booking",
+                                })
+                              }
+                              className="text-xs font-semibold border-primary/40 text-primary hover:bg-primary/10 h-7 px-2.5 cursor-pointer"
+                            >
+                              <MessageSquare className="mr-1 h-3 w-3" />
+                              Messages
+                            </Button>
+                          )}
+
+                          {/* Coordination Feedback button on accepted booking */}
+                          {booking.status === "accepted" && (
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              onClick={() =>
+                                setReviewingBooking({
+                                  id: booking.id,
+                                  listerName: booking.lister_name || "Equipment Host",
+                                  mode: "coordination",
+                                })
+                              }
+                              className="text-xs font-semibold border-blue-500/40 text-blue-600 hover:bg-blue-500/10 h-7 px-2.5 cursor-pointer"
+                            >
+                              <CheckCircle2 className="mr-1 h-3 w-3" />
+                              Feedback
+                            </Button>
+                          )}
+
                           {canCancel && (
                             <Button
                               type="button"
@@ -501,14 +794,17 @@ export function DashboardTabs({
                               onClick={() =>
                                 setReviewingBooking({
                                   id: booking.id,
-                                  listerName: listing?.title ? `Owner of ${listing.title}` : "Equipment Owner",
+                                  listerName:
+                                    booking.lister_name ||
+                                    (listing?.title ? `Owner of ${listing.title}` : "Equipment Host"),
+                                  mode: "lister",
                                 })
                               }
                               disabled={booking.is_reviewed}
                               className="text-xs font-semibold border-primary/40 text-primary hover:bg-primary/10 h-7 px-2.5 cursor-pointer"
                             >
                               <Star className="mr-1 h-3 w-3 fill-primary/30" />
-                              {booking.is_reviewed ? "Reviewed" : "Review Lister"}
+                              {booking.is_reviewed ? "Reviewed" : "Review Host"}
                             </Button>
                           )}
                         </div>
@@ -654,9 +950,12 @@ export function DashboardTabs({
                                     {listing?.category?.name || "Equipment"}
                                   </span>
                                   <span className="text-muted-foreground/60">•</span>
-                                  <span className="text-xs text-muted-foreground font-mono">
-                                    Renter: {request.renter_id}
-                                  </span>
+                                  <Link
+                                    href={`/profile/${request.renter_id}`}
+                                    className="text-xs text-muted-foreground font-medium hover:text-primary hover:underline transition-colors"
+                                  >
+                                    Renter: {request.renter_name || "Verified Renter"}
+                                  </Link>
                                 </div>
 
                                 <h4 className="font-heading text-base font-bold text-foreground mt-0.5 line-clamp-1">
@@ -680,6 +979,45 @@ export function DashboardTabs({
 
                             <div className="flex flex-row lg:flex-col items-center lg:items-end justify-between lg:justify-center gap-3 pt-3 lg:pt-0 border-t lg:border-t-0 border-border/60">
                               {renderStatusBadge(request.status)}
+
+                              {/* Message Button for accepted/active incoming booking */}
+                              {["accepted", "paid", "active", "confirmed", "in_progress", "returned", "completed"].includes(request.status) && (
+                                <Button
+                                  type="button"
+                                  variant="outline"
+                                  size="sm"
+                                  onClick={() =>
+                                    setChattingBooking({
+                                      id: request.id,
+                                      listingTitle: listing?.title || "Rental Request",
+                                    })
+                                  }
+                                  className="text-xs font-semibold border-primary/40 text-primary hover:bg-primary/10 h-7 px-2.5 cursor-pointer"
+                                >
+                                  <MessageSquare className="mr-1 h-3 w-3" />
+                                  Messages
+                                </Button>
+                              )}
+
+                              {/* Coordination Feedback for accepted incoming request */}
+                              {request.status === "accepted" && (
+                                <Button
+                                  type="button"
+                                  variant="outline"
+                                  size="sm"
+                                  onClick={() =>
+                                    setReviewingBooking({
+                                      id: request.id,
+                                      listerName: request.renter_name || "Verified Renter",
+                                      mode: "coordination",
+                                    })
+                                  }
+                                  className="text-xs font-semibold border-blue-500/40 text-blue-600 hover:bg-blue-500/10 h-7 px-2.5 cursor-pointer"
+                                >
+                                  <CheckCircle2 className="mr-1 h-3 w-3" />
+                                  Feedback
+                                </Button>
+                              )}
 
                               {isPending && (
                                 <div className="flex items-center gap-2">
@@ -789,6 +1127,13 @@ export function DashboardTabs({
                                 {item.location}
                               </p>
                             </div>
+
+                            {stateInfo.isRejected && stateInfo.rejectionReason && (
+                              <div className="mx-4 mb-3 rounded-xl border border-rose-500/30 bg-rose-500/10 p-2.5 text-xs text-rose-700 dark:text-rose-300">
+                                <span className="font-semibold block mb-0.5">Moderator Feedback:</span>
+                                {stateInfo.rejectionReason}
+                              </div>
+                            )}
                           </div>
 
                           <div className="flex flex-col gap-2 border-t border-border/60 p-4 pt-3 bg-muted/10">
@@ -820,31 +1165,43 @@ export function DashboardTabs({
                               </div>
                             </div>
 
-                            {/* Authoritative Availability Toggle Button */}
+                            {/* Authoritative Availability Toggle or Resubmit Button */}
                             <div className="pt-2 border-t border-border/40 flex items-center justify-between text-xs">
                               <span className="text-muted-foreground">
                                 Status: <strong className="text-foreground">{stateInfo.label}</strong>
                               </span>
 
-                              <Button
-                                type="button"
-                                variant="outline"
-                                size="sm"
-                                disabled={isActionLoading}
-                                onClick={() => handleToggleAvailability(item.id)}
-                                className={`h-7 text-xs font-semibold cursor-pointer ${
-                                  item.status === "available"
-                                    ? "border-amber-500/40 text-amber-600 hover:bg-amber-500/10"
-                                    : "border-emerald-600/40 text-emerald-600 hover:bg-emerald-600/10"
-                                }`}
-                              >
-                                {isActionLoading ? (
-                                  <Loader2 className="h-3 w-3 animate-spin mr-1" />
-                                ) : (
-                                  <Power className="mr-1 h-3 w-3" />
-                                )}
-                                {item.status === "available" ? "Set Unavailable" : "Make Available"}
-                              </Button>
+                              {stateInfo.isRejected ? (
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  onClick={() => handleOpenResubmit(item, stateInfo.rejectionReason || "")}
+                                  className="h-7 text-xs font-semibold bg-rose-600 hover:bg-rose-700 text-white cursor-pointer"
+                                >
+                                  <RotateCcw className="mr-1 h-3 w-3" />
+                                  Revise & Resubmit
+                                </Button>
+                              ) : (
+                                <Button
+                                  type="button"
+                                  variant="outline"
+                                  size="sm"
+                                  disabled={isActionLoading}
+                                  onClick={() => handleToggleAvailability(item.id)}
+                                  className={`h-7 text-xs font-semibold cursor-pointer ${
+                                    item.status === "available"
+                                      ? "border-amber-500/40 text-amber-600 hover:bg-amber-500/10"
+                                      : "border-emerald-600/40 text-emerald-600 hover:bg-emerald-600/10"
+                                  }`}
+                                >
+                                  {isActionLoading ? (
+                                    <Loader2 className="h-3 w-3 animate-spin mr-1" />
+                                  ) : (
+                                    <Power className="mr-1 h-3 w-3" />
+                                  )}
+                                  {item.status === "available" ? "Set Unavailable" : "Make Available"}
+                                </Button>
+                              )}
                             </div>
                           </div>
                         </Card>
@@ -923,9 +1280,12 @@ export function DashboardTabs({
                                   {listing?.category?.name || "Equipment"}
                                 </span>
                                 <span className="text-muted-foreground/60">•</span>
-                                <span className="text-xs text-muted-foreground font-mono">
-                                  Renter ID: {item.renter_id}
-                                </span>
+                                <Link
+                                  href={`/profile/${item.renter_id}`}
+                                  className="text-xs text-muted-foreground font-medium hover:text-primary hover:underline transition-colors"
+                                >
+                                  Renter: {item.renter_name || "Verified Renter"}
+                                </Link>
                               </div>
 
                               <Link href={`/listings/${item.listing_id}`}>
@@ -968,6 +1328,22 @@ export function DashboardTabs({
 
                             <div className="flex items-center gap-2">
                               {renderStatusBadge(item.status)}
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                onClick={() =>
+                                  setReviewingBooking({
+                                    id: item.id,
+                                    listerName: item.renter_name || "Verified Renter",
+                                    mode: "renter",
+                                  })
+                                }
+                                className="text-xs font-semibold border-primary/40 text-primary hover:bg-primary/10 h-7 px-2.5 cursor-pointer"
+                              >
+                                <Star className="mr-1 h-3 w-3 fill-primary/30" />
+                                Review Renter
+                              </Button>
                               <Badge variant="outline" className="text-[10px] text-muted-foreground border-border/60">
                                 Reusable Listing
                               </Badge>
@@ -994,22 +1370,389 @@ export function DashboardTabs({
         </div>
       )}
 
-      {/* Write Lister Review Modal Dialog */}
+      {/* Write Lister Review / Coordination Feedback Modal Dialog */}
       {reviewingBooking && (
         <WriteListerReviewModal
           bookingId={reviewingBooking.id}
           listerName={reviewingBooking.listerName}
+          mode={reviewingBooking.mode || "lister"}
           isOpen={true}
           onClose={() => setReviewingBooking(null)}
           onSuccess={() => {
-            setRentals((prev) =>
-              prev.map((item) =>
-                item.id === reviewingBooking.id ? { ...item, is_reviewed: true } : item
-              )
-            );
-            showNotification("Review submitted successfully! Thank you for your feedback.", "success");
+            if (reviewingBooking.mode === "coordination") {
+              showNotification("Coordination feedback recorded successfully.", "success");
+            } else if (reviewingBooking.mode === "renter") {
+              showNotification("Renter review submitted successfully! Thank you.", "success");
+            } else {
+              setRentals((prev) =>
+                prev.map((item) =>
+                  item.id === reviewingBooking.id ? { ...item, is_reviewed: true } : item
+                )
+              );
+              showNotification("Review submitted successfully! Thank you for your feedback.", "success");
+            }
           }}
         />
+      )}
+
+      {/* Booking 1-to-1 Chat Modal Dialog */}
+      {chattingBooking && (
+        <BookingChatModal
+          bookingId={chattingBooking.id}
+          listingTitle={chattingBooking.listingTitle}
+          isOpen={true}
+          onClose={() => setChattingBooking(null)}
+          currentUserId={_userId || ""}
+        />
+      )}
+
+      {/* Accessible Confirmation Modal: Delete / Archive Listing */}
+      {deletingListing && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 animate-in fade-in duration-200">
+          <Card className="w-full max-w-md rounded-2xl border border-border bg-card p-6 shadow-2xl">
+            {deletingListing.hasActiveReservation ? (
+              <div className="space-y-4">
+                <div className="flex items-center gap-3 text-amber-600 dark:text-amber-500">
+                  <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-amber-500/10 border border-amber-500/20">
+                    <AlertTriangle className="h-5 w-5" />
+                  </div>
+                  <div>
+                    <h3 className="font-heading text-base font-bold text-foreground">
+                      Cannot Remove Listing
+                    </h3>
+                    <p className="text-xs text-muted-foreground">Active reservations present</p>
+                  </div>
+                </div>
+
+                <div className="rounded-xl bg-muted/40 p-3.5 text-xs text-muted-foreground space-y-2">
+                  <p>
+                    <strong className="text-foreground">{deletingListing.title}</strong> has active or pending bookings. Equipment with reservations cannot be deleted to preserve contract integrity.
+                  </p>
+                  <p>
+                    You can toggle its availability to <strong>&ldquo;Not Available&rdquo;</strong> to block new requests while servicing existing bookings.
+                  </p>
+                </div>
+
+                <div className="flex items-center justify-end gap-2 pt-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setDeletingListing(null)}
+                    className="text-xs font-semibold"
+                  >
+                    Close
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    onClick={() => {
+                      const id = deletingListing.id;
+                      setDeletingListing(null);
+                      handleToggleAvailability(id);
+                    }}
+                    className="bg-primary hover:bg-primary/90 text-primary-foreground text-xs font-semibold"
+                  >
+                    Mark as Not Available
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                <div className="flex items-center gap-3 text-destructive">
+                  <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-destructive/10 border border-destructive/20">
+                    <Trash2 className="h-5 w-5" />
+                  </div>
+                  <div>
+                    <h3 className="font-heading text-base font-bold text-foreground">
+                      Delete Equipment Listing
+                    </h3>
+                    <p className="text-xs text-muted-foreground">Permanent inventory removal</p>
+                  </div>
+                </div>
+
+                <p className="text-xs text-muted-foreground">
+                  Are you sure you want to delete <strong className="text-foreground">&ldquo;{deletingListing.title}&rdquo;</strong>? If this item has 0 booking history, it and all uploaded photos will be permanently deleted from the database. If historical completed bookings exist, you will be prompted to safely archive it instead.
+                </p>
+
+                <div className="flex items-center justify-end gap-2 pt-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setDeletingListing(null)}
+                    className="text-xs font-semibold"
+                  >
+                    Cancel
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="destructive"
+                    size="sm"
+                    onClick={confirmDeleteListing}
+                    className="text-xs font-semibold cursor-pointer"
+                  >
+                    Delete Listing
+                  </Button>
+                </div>
+              </div>
+            )}
+          </Card>
+        </div>
+      )}
+
+      {/* Accessible Confirmation Modal: Archive Listing (Historical Records Retention) */}
+      {archivingListing && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 animate-in fade-in duration-200">
+          <Card className="w-full max-w-md rounded-2xl border border-border bg-card p-6 shadow-2xl space-y-4">
+            <div className="flex items-center gap-3 text-amber-600 dark:text-amber-500">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-amber-500/10 border border-amber-500/20">
+                <AlertCircle className="h-5 w-5" />
+              </div>
+              <div>
+                <h3 className="font-heading text-base font-bold text-foreground">
+                  Archive Equipment Listing
+                </h3>
+                <p className="text-xs text-muted-foreground">Preserve financial & audit records</p>
+              </div>
+            </div>
+
+            <div className="rounded-xl bg-muted/40 p-3.5 text-xs text-muted-foreground space-y-2">
+              <p>
+                <strong className="text-foreground">{archivingListing.title}</strong> has historical completed bookings that cannot be hard-deleted due to financial accounting and contractual compliance requirements.
+              </p>
+              <p>
+                Archiving will safely remove this equipment from public marketplace searches and your active inventory while retaining historical audit records.
+              </p>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-2">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => setArchivingListing(null)}
+                className="text-xs font-semibold"
+              >
+                Keep Active
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                onClick={confirmArchiveListing}
+                className="bg-primary hover:bg-primary/90 text-primary-foreground text-xs font-semibold cursor-pointer"
+              >
+                Archive Listing
+              </Button>
+            </div>
+          </Card>
+        </div>
+      )}
+
+      {/* Accessible Confirmation Modal: Cancel Reservation (Renter) */}
+      {cancellingBooking && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 animate-in fade-in duration-200">
+          <Card className="w-full max-w-md rounded-2xl border border-border bg-card p-6 shadow-2xl space-y-4">
+            <div className="flex items-center gap-3 text-destructive">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-destructive/10 border border-destructive/20">
+                <XCircle className="h-5 w-5" />
+              </div>
+              <div>
+                <h3 className="font-heading text-base font-bold text-foreground">
+                  Cancel Reservation
+                </h3>
+                <p className="text-xs text-muted-foreground">Release booking dates</p>
+              </div>
+            </div>
+
+            <p className="text-xs text-muted-foreground">
+              Are you sure you want to cancel your reservation for <strong className="text-foreground">&ldquo;{cancellingBooking.title}&rdquo;</strong> ({cancellingBooking.dates})? The reserved dates will be immediately freed for other renters.
+            </p>
+
+            <div className="flex items-center justify-end gap-2 pt-2">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => setCancellingBooking(null)}
+                className="text-xs font-semibold"
+              >
+                Keep Reservation
+              </Button>
+              <Button
+                type="button"
+                variant="destructive"
+                size="sm"
+                onClick={confirmCancelBooking}
+                className="text-xs font-semibold cursor-pointer"
+              >
+                Cancel Reservation
+              </Button>
+            </div>
+          </Card>
+        </div>
+      )}
+
+      {/* Accessible Confirmation Modal: Decline Request (Owner) */}
+      {decliningBooking && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 animate-in fade-in duration-200">
+          <Card className="w-full max-w-md rounded-2xl border border-border bg-card p-6 shadow-2xl space-y-4">
+            <div className="flex items-center gap-3 text-destructive">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-destructive/10 border border-destructive/20">
+                <XCircle className="h-5 w-5" />
+              </div>
+              <div>
+                <h3 className="font-heading text-base font-bold text-foreground">
+                  Decline Booking Request
+                </h3>
+                <p className="text-xs text-muted-foreground">Release requested dates</p>
+              </div>
+            </div>
+
+            <p className="text-xs text-muted-foreground">
+              Are you sure you want to decline the booking request from <strong className="text-foreground">{decliningBooking.renterName}</strong> for <strong className="text-foreground">&ldquo;{decliningBooking.title}&rdquo;</strong>? The requested dates will be made available for other renters.
+            </p>
+
+            <div className="flex items-center justify-end gap-2 pt-2">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => setDecliningBooking(null)}
+                className="text-xs font-semibold"
+              >
+                Keep Request
+              </Button>
+              <Button
+                type="button"
+                variant="destructive"
+                size="sm"
+                onClick={confirmDeclineRequest}
+                className="text-xs font-semibold cursor-pointer"
+              >
+                Decline Request
+              </Button>
+            </div>
+          </Card>
+        </div>
+      )}
+
+      {/* Accessible Modal: Revise & Resubmit Listing */}
+      {resubmittingListing && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 animate-in fade-in duration-200">
+          <Card className="w-full max-w-lg max-h-[90vh] overflow-y-auto rounded-2xl border border-border bg-card p-6 shadow-2xl space-y-4">
+            <div className="flex items-center gap-3 text-amber-500">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-amber-500/10 border border-amber-500/20">
+                <RotateCcw className="h-5 w-5" />
+              </div>
+              <div>
+                <h3 className="font-heading text-base font-bold text-foreground">
+                  Revise & Resubmit Listing
+                </h3>
+                <p className="text-xs text-muted-foreground">Address moderator feedback and submit for review</p>
+              </div>
+            </div>
+
+            {resubmittingListing.rejectionReason && (
+              <div className="rounded-xl border border-rose-500/30 bg-rose-500/10 p-3 text-xs text-rose-700 dark:text-rose-300">
+                <span className="font-semibold block mb-1">Moderator Feedback:</span>
+                {resubmittingListing.rejectionReason}
+              </div>
+            )}
+
+            <div className="space-y-3 pt-1">
+              <div className="space-y-1">
+                <Label htmlFor="resubmit-title" className="text-xs font-medium">Equipment Title</Label>
+                <Input
+                  id="resubmit-title"
+                  value={resubmittingListing.title}
+                  onChange={(e) =>
+                    setResubmittingListing((prev) => prev ? { ...prev, title: e.target.value } : null)
+                  }
+                  className="h-8 text-xs"
+                  placeholder="e.g., Cat 320 Hydraulic Excavator"
+                  maxLength={120}
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1">
+                  <Label htmlFor="resubmit-price" className="text-xs font-medium">Daily Rate (₱)</Label>
+                  <Input
+                    id="resubmit-price"
+                    type="number"
+                    value={resubmittingListing.pricePerDay}
+                    onChange={(e) =>
+                      setResubmittingListing((prev) => prev ? { ...prev, pricePerDay: e.target.value } : null)
+                    }
+                    className="h-8 text-xs"
+                    min={1}
+                    max={5000000}
+                  />
+                </div>
+                <div className="space-y-1">
+                  <Label htmlFor="resubmit-location" className="text-xs font-medium">Location</Label>
+                  <Input
+                    id="resubmit-location"
+                    value={resubmittingListing.location}
+                    onChange={(e) =>
+                      setResubmittingListing((prev) => prev ? { ...prev, location: e.target.value } : null)
+                    }
+                    className="h-8 text-xs"
+                    placeholder="e.g., Taguig, Metro Manila"
+                  />
+                </div>
+              </div>
+
+              <div className="space-y-1">
+                <Label htmlFor="resubmit-description" className="text-xs font-medium">Description</Label>
+                <Textarea
+                  id="resubmit-description"
+                  rows={4}
+                  value={resubmittingListing.description}
+                  onChange={(e) =>
+                    setResubmittingListing((prev) => prev ? { ...prev, description: e.target.value } : null)
+                  }
+                  className="text-xs resize-none"
+                  placeholder="Provide detailed equipment specifications, condition, and rental terms..."
+                  maxLength={3000}
+                />
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-border/40">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={isResubmitting}
+                onClick={() => setResubmittingListing(null)}
+                className="text-xs font-semibold"
+              >
+                Cancel
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                disabled={isResubmitting}
+                onClick={confirmResubmitListing}
+                className="text-xs font-semibold bg-rose-600 hover:bg-rose-700 text-white cursor-pointer"
+              >
+                {isResubmitting ? (
+                  <>
+                    <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                    Resubmitting...
+                  </>
+                ) : (
+                  <>
+                    <RotateCcw className="mr-1.5 h-3.5 w-3.5" />
+                    Resubmit for Review
+                  </>
+                )}
+              </Button>
+            </div>
+          </Card>
+        </div>
       )}
     </div>
   );

@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { ArrowLeft, MapPin, ShieldCheck } from "lucide-react";
+import { auth } from "@clerk/nextjs/server";
+import { ArrowLeft, MapPin, ShieldCheck, ShieldAlert } from "lucide-react";
 import { Navbar } from "@/components/landing/navbar";
 import { Footer } from "@/components/landing/footer";
 import { Badge } from "@/components/ui/badge";
@@ -16,6 +17,8 @@ import {
   getListerRatingSummary,
 } from "@/lib/supabase/lister-reviews";
 import { ListerProfileCard } from "@/components/reviews/lister-profile-card";
+import { ReportButton } from "@/components/moderation/report-button";
+import { verifyAdminSession } from "@/lib/auth/admin";
 
 interface ListingDetailPageProps {
   params: Promise<{ id: string }>;
@@ -30,6 +33,29 @@ export default async function ListingDetailPage({ params }: ListingDetailPagePro
 
   if (!listing) {
     notFound();
+  }
+
+  // Access Control: Public visitors can ONLY access available listings.
+  // Non-available listings (pending_review, restricted, archived, deleted, shadow_quarantined)
+  // are strictly restricted to the listing owner and authorized administrators.
+  let isOwner = false;
+  let isAdmin = false;
+
+  if (listing.status !== "available") {
+    const { userId } = await auth();
+    if (!userId) {
+      notFound();
+    }
+
+    isOwner = userId === listing.owner_id;
+    if (!isOwner) {
+      const adminAuth = await verifyAdminSession();
+      isAdmin = adminAuth.authorized;
+    }
+
+    if (!isOwner && !isAdmin) {
+      notFound();
+    }
   }
 
   // Fetch real database-backed lister profile and reviews summary using authoritative listing.owner_id
@@ -67,6 +93,20 @@ export default async function ListingDetailPage({ params }: ListingDetailPagePro
     <div className="flex min-h-screen flex-col bg-background font-sans text-foreground">
       <Navbar />
 
+      {listing.status !== "available" && (
+        <div className="bg-amber-500/10 border-b border-amber-500/20 py-2.5 px-4 sm:px-6">
+          <div className="mx-auto max-w-7xl flex items-center justify-between text-xs text-amber-700 dark:text-amber-300 font-medium">
+            <span className="flex items-center gap-1.5">
+              <ShieldAlert className="h-4 w-4" />
+              {isOwner ? "Owner Preview Mode" : "Admin Inspection Mode"} — Listing Status: <strong className="capitalize">{listing.status}</strong> (Hidden from public marketplace)
+            </span>
+            <Badge variant="outline" className="border-amber-500/40 text-[10px] uppercase font-bold text-amber-700 dark:text-amber-300">
+              Unpublished
+            </Badge>
+          </div>
+        </div>
+      )}
+
       <main className="flex-1 py-8 sm:py-12">
         <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
           {/* Breadcrumb & Navigation */}
@@ -86,6 +126,15 @@ export default async function ListingDetailPage({ params }: ListingDetailPagePro
               <Badge className="bg-emerald-600 text-white text-xs">
                 Verified Listing
               </Badge>
+              <ReportButton
+                targetType="listing"
+                targetId={listing.id}
+                targetTitle={listing.title}
+                variant="outline"
+                size="sm"
+                label="Report"
+                className="h-6 text-xs text-muted-foreground hover:text-destructive hover:border-destructive/40"
+              />
             </div>
           </div>
 

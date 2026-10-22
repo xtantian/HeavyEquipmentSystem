@@ -19,6 +19,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { StarRating } from "@/components/reviews/star-rating";
 import { ListerReviewsList } from "@/components/reviews/lister-reviews-list";
+import { ReportButton } from "@/components/moderation/report-button";
 import {
   getPublicListerProfile,
   getListerRatingSummary,
@@ -139,6 +140,17 @@ export default async function ListerProfilePage({ params }: ListerProfilePagePro
                 <p className="text-[11px] text-muted-foreground text-left sm:text-right max-w-xs">
                   All transactions and equipment handovers through Rent It are protected with deposit escrow.
                 </p>
+                <div className="pt-1">
+                  <ReportButton
+                    targetType="profile"
+                    targetId={id}
+                    targetTitle={profile?.name || "User Profile"}
+                    variant="outline"
+                    size="sm"
+                    label="Report User"
+                    className="h-7 text-xs text-muted-foreground hover:text-destructive hover:border-destructive/40"
+                  />
+                </div>
               </div>
             </div>
           </Card>

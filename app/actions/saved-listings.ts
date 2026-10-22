@@ -61,11 +61,23 @@ export async function toggleSaveListingAction(
       .maybeSingle();
 
     if (selectError) {
-      console.error("[toggleSaveListingAction] Select error:", selectError.message);
+      const isMissingTable =
+        selectError.code === "PGRST205" ||
+        selectError.message?.toLowerCase().includes("could not find the table") ||
+        selectError.message?.toLowerCase().includes("does not exist");
+
+      console.error("[toggleSaveListingAction] Select error:", {
+        code: selectError.code,
+        message: selectError.message,
+        missingSchema: isMissingTable,
+      });
+
       return {
         success: false,
         saved: false,
-        error: "Failed to check saved status. Please try again.",
+        error: isMissingTable
+          ? "The saved listings feature is currently unavailable (database schema not applied). Please try again later."
+          : "Failed to check saved status. Please try again.",
         code: "ERROR",
       };
     }
@@ -102,11 +114,24 @@ export async function toggleSaveListingAction(
         if (insertError.code === "23505") {
           return { success: true, saved: true };
         }
-        console.error("[toggleSaveListingAction] Insert error:", insertError.message);
+
+        const isMissingTable =
+          insertError.code === "PGRST205" ||
+          insertError.message?.toLowerCase().includes("could not find the table") ||
+          insertError.message?.toLowerCase().includes("does not exist");
+
+        console.error("[toggleSaveListingAction] Insert error:", {
+          code: insertError.code,
+          message: insertError.message,
+          missingSchema: isMissingTable,
+        });
+
         return {
           success: false,
           saved: false,
-          error: "Failed to save listing. Please try again.",
+          error: isMissingTable
+            ? "The saved listings feature is currently unavailable (database schema not applied). Please try again later."
+            : "Failed to save listing. Please try again.",
           code: "ERROR",
         };
       }

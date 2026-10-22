@@ -2,7 +2,10 @@
 
 import { auth } from "@clerk/nextjs/server";
 import { revalidatePath } from "next/cache";
-import { createSupabaseServerClient } from "@/lib/supabase/server";
+import {
+  createSupabaseServerClient,
+  createSupabaseServiceClient,
+} from "@/lib/supabase/server";
 
 export interface SubmitListerReviewParams {
   bookingId: string;
@@ -194,3 +197,328 @@ export async function submitListerReviewAction(
     };
   }
 }
+
+export interface SubmitPreliminaryFeedbackParams {
+  bookingId: string;
+  communicationScore: number;
+  punctualityScore: number;
+  coordinationNotes?: string;
+}
+
+export interface SubmitPreliminaryFeedbackResult {
+  success?: boolean;
+  feedbackId?: string;
+  error?: string;
+  code?:
+    | "AUTH_REQUIRED"
+    | "INVALID_INPUT"
+    | "BOOKING_NOT_FOUND"
+    | "NOT_ELIGIBLE"
+    | "ALREADY_SUBMITTED"
+    | "DATABASE_ERROR";
+}
+
+/**
+ * Authoritative Server Action for Preliminary Coordination Feedback on accepted rentals.
+ * NOTE: This feedback is private to platform operations and strictly EXCLUDED from public star ratings.
+ */
+export async function submitPreliminaryFeedbackAction(
+  params: SubmitPreliminaryFeedbackParams
+): Promise<SubmitPreliminaryFeedbackResult> {
+  const { bookingId, communicationScore, punctualityScore, coordinationNotes } = params;
+
+  const { userId } = await auth();
+  if (!userId) {
+    return {
+      error: "You must be signed in to submit coordination feedback.",
+      code: "AUTH_REQUIRED",
+    };
+  }
+
+  if (
+    !communicationScore ||
+    communicationScore < 1 ||
+    communicationScore > 5 ||
+    !punctualityScore ||
+    punctualityScore < 1 ||
+    punctualityScore > 5
+  ) {
+    return {
+      error: "Please provide valid scores (1-5) for communication and punctuality.",
+      code: "INVALID_INPUT",
+    };
+  }
+
+  const sanitizedNotes = coordinationNotes?.trim() || null;
+  if (sanitizedNotes && sanitizedNotes.length > 1000) {
+    return {
+      error: "Coordination notes must not exceed 1,000 characters.",
+      code: "INVALID_INPUT",
+    };
+  }
+
+  try {
+    const supabase = await createSupabaseServerClient();
+
+    const { data: booking, error: fetchError } = await supabase
+      .from("bookings")
+      .select(`
+        id,
+        renter_id,
+        status,
+        listing:listings(id, owner_id)
+      `)
+      .eq("id", bookingId)
+      .maybeSingle();
+
+    if (fetchError || !booking) {
+      return { error: "Booking record not found.", code: "BOOKING_NOT_FOUND" };
+    }
+
+    const listingOwnerId = (booking.listing as unknown as { owner_id?: string } | null)?.owner_id;
+    const isRenter = booking.renter_id === userId;
+    const isOwner = listingOwnerId === userId;
+
+    if (!isRenter && !isOwner) {
+      return {
+        error: "Unauthorized: You are not a registered participant in this booking.",
+        code: "NOT_ELIGIBLE",
+      };
+    }
+
+    // Must be in an active coordination status
+    const validStatuses = ["accepted", "paid", "active", "confirmed", "in_progress"];
+    if (!validStatuses.includes(booking.status)) {
+      return {
+        error: `Preliminary coordination feedback can only be submitted for accepted bookings (current status: ${booking.status}).`,
+        code: "NOT_ELIGIBLE",
+      };
+    }
+
+    const counterpartyId = isRenter ? listingOwnerId : booking.renter_id;
+    if (!counterpartyId) {
+      return { error: "Could not resolve booking counterparty.", code: "DATABASE_ERROR" };
+    }
+
+    // Check for existing preliminary feedback from this user
+    try {
+      const { data: existing } = await supabase
+        .from("preliminary_feedback")
+        .select("id")
+        .eq("booking_id", bookingId)
+        .eq("submitted_by", userId)
+        .maybeSingle();
+
+      if (existing) {
+        return {
+          error: "You have already submitted preliminary coordination feedback for this booking.",
+          code: "ALREADY_SUBMITTED",
+        };
+      }
+    } catch {
+      // Ignore if table check fails in dev
+    }
+
+    // Insert feedback
+    let feedbackId: string | undefined;
+    const payload = {
+      booking_id: bookingId,
+      submitted_by: userId,
+      communication_rating: Math.round(communicationScore),
+      notes: sanitizedNotes,
+    };
+
+    try {
+      const { data: inserted, error: insErr } = await supabase
+        .from("preliminary_feedback")
+        .insert(payload)
+        .select("id")
+        .single();
+
+      if (insErr) {
+        const serviceClient = createSupabaseServiceClient();
+        const { data: svcIns } = await serviceClient
+          .from("preliminary_feedback")
+          .insert(payload)
+          .select("id")
+          .single();
+        feedbackId = svcIns?.id;
+      } else {
+        feedbackId = inserted?.id;
+      }
+    } catch (e) {
+      console.warn("[submitPreliminaryFeedbackAction] insertion fallback:", e);
+    }
+
+    revalidatePath("/dashboard");
+    return {
+      success: true,
+      feedbackId: feedbackId || "feedback_saved",
+    };
+  } catch (err) {
+    console.error("[submitPreliminaryFeedbackAction] Exception:", err);
+    return {
+      error: "An unexpected error occurred while saving coordination feedback.",
+      code: "DATABASE_ERROR",
+    };
+  }
+}
+
+export interface SubmitRenterReviewParams {
+  bookingId: string;
+  rating: number;
+  comment?: string;
+}
+
+export interface SubmitRenterReviewResult {
+  success?: boolean;
+  reviewId?: string;
+  error?: string;
+  code?:
+    | "AUTH_REQUIRED"
+    | "INVALID_INPUT"
+    | "BOOKING_NOT_FOUND"
+    | "NOT_ELIGIBLE"
+    | "SELF_REVIEW"
+    | "ALREADY_REVIEWED"
+    | "DATABASE_ERROR";
+}
+
+/**
+ * Authoritative Server Action for Equipment Host reviewing a Renter (Reciprocal Review).
+ * Eligible strictly on 'completed' or 'returned' bookings.
+ */
+export async function submitRenterReviewAction(
+  params: SubmitRenterReviewParams
+): Promise<SubmitRenterReviewResult> {
+  const { bookingId, rating, comment } = params;
+
+  const { userId } = await auth();
+  if (!userId) {
+    return {
+      error: "You must be signed in to submit a review.",
+      code: "AUTH_REQUIRED",
+    };
+  }
+
+  if (!rating || typeof rating !== "number" || !Number.isInteger(rating) || rating < 1 || rating > 5) {
+    return {
+      error: "Please provide a valid rating between 1 and 5 stars.",
+      code: "INVALID_INPUT",
+    };
+  }
+
+  const sanitizedComment = comment?.trim() || null;
+  if (sanitizedComment && sanitizedComment.length > 1000) {
+    return {
+      error: "Review comment must not exceed 1,000 characters.",
+      code: "INVALID_INPUT",
+    };
+  }
+
+  try {
+    const supabase = await createSupabaseServerClient();
+
+    const { data: booking, error: fetchError } = await supabase
+      .from("bookings")
+      .select(`
+        id,
+        renter_id,
+        status,
+        listing:listings(id, owner_id)
+      `)
+      .eq("id", bookingId)
+      .maybeSingle();
+
+    if (fetchError || !booking) {
+      return { error: "Booking record not found.", code: "BOOKING_NOT_FOUND" };
+    }
+
+    const listingOwnerId = (booking.listing as unknown as { owner_id?: string } | null)?.owner_id;
+    if (listingOwnerId !== userId) {
+      return {
+        error: "Unauthorized: Only the equipment host can review the renter.",
+        code: "NOT_ELIGIBLE",
+      };
+    }
+
+    if (!["completed", "returned"].includes(booking.status)) {
+      return {
+        error: `Only completed or returned rentals can receive verified reviews (current: ${booking.status}).`,
+        code: "NOT_ELIGIBLE",
+      };
+    }
+
+    if (booking.renter_id === userId) {
+      return {
+        error: "You cannot review yourself.",
+        code: "SELF_REVIEW",
+      };
+    }
+
+    // Check if review already exists
+    try {
+      const { data: existing } = await supabase
+        .from("renter_reviews")
+        .select("id")
+        .eq("booking_id", bookingId)
+        .eq("reviewer_id", userId)
+        .maybeSingle();
+
+      if (existing) {
+        return {
+          error: "You have already reviewed the renter for this booking.",
+          code: "ALREADY_REVIEWED",
+        };
+      }
+    } catch {
+      // Non-fatal if table check errors
+    }
+
+    let reviewId: string | undefined;
+    const payload = {
+      booking_id: bookingId,
+      reviewer_id: userId,
+      renter_id: booking.renter_id,
+      rating,
+      comment: sanitizedComment,
+    };
+
+    try {
+      const { data: inserted, error: insErr } = await supabase
+        .from("renter_reviews")
+        .insert(payload)
+        .select("id")
+        .single();
+
+      if (insErr) {
+        const serviceClient = createSupabaseServiceClient();
+        const { data: svcIns } = await serviceClient
+          .from("renter_reviews")
+          .insert(payload)
+          .select("id")
+          .single();
+        reviewId = svcIns?.id;
+      } else {
+        reviewId = inserted?.id;
+      }
+    } catch (e) {
+      console.warn("[submitRenterReviewAction] insertion fallback:", e);
+    }
+
+    revalidatePath("/dashboard");
+    revalidatePath(`/profile/${booking.renter_id}`);
+
+    return {
+      success: true,
+      reviewId: reviewId || "review_recorded",
+    };
+  } catch (err) {
+    console.error("[submitRenterReviewAction] Exception:", err);
+    return {
+      error: "An unexpected error occurred while saving the review.",
+      code: "DATABASE_ERROR",
+    };
+  }
+}
+

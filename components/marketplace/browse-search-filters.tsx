@@ -50,6 +50,9 @@ export function BrowseSearchFilters({
     (newParams: { q?: string; min?: string; max?: string }) => {
       const params = new URLSearchParams(searchParams.toString());
 
+      // Reset page back to 1 whenever filters change
+      params.delete("page");
+
       if (newParams.q !== undefined) {
         if (newParams.q.trim()) {
           params.set("q", newParams.q.trim());
@@ -75,24 +78,30 @@ export function BrowseSearchFilters({
       }
 
       const queryString = params.toString();
-      router.push(`${pathname}${queryString ? `?${queryString}` : ""}`);
+      const targetUrl = `${pathname}${queryString ? `?${queryString}` : ""}`;
+
+      // Use React.startTransition and router.replace with { scroll: false }
+      // to keep typing responsive and prevent browser history stack pollution
+      React.startTransition(() => {
+        router.replace(targetUrl, { scroll: false });
+      });
     },
     [router, pathname, searchParams]
   );
 
-  // Debounce search query by 300ms
+  // Debounce search query by 500ms to avoid micro-burst requests while typing
   React.useEffect(() => {
     const timer = setTimeout(() => {
       const currentParamQ = searchParams.get("q") || "";
       if (query !== currentParamQ) {
         updateUrl({ q: query });
       }
-    }, 300);
+    }, 500);
 
     return () => clearTimeout(timer);
   }, [query, searchParams, updateUrl]);
 
-  // Debounce price inputs by 300ms
+  // Debounce price inputs by 500ms
   React.useEffect(() => {
     const timer = setTimeout(() => {
       const currentParamMin = searchParams.get("min") || "";
@@ -100,7 +109,7 @@ export function BrowseSearchFilters({
       if (minPrice !== currentParamMin || maxPrice !== currentParamMax) {
         updateUrl({ min: minPrice, max: maxPrice });
       }
-    }, 300);
+    }, 500);
 
     return () => clearTimeout(timer);
   }, [minPrice, maxPrice, searchParams, updateUrl]);
@@ -109,6 +118,13 @@ export function BrowseSearchFilters({
     setMinPrice("");
     setMaxPrice("");
     updateUrl({ min: "", max: "" });
+  };
+
+  const handleSearchKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      updateUrl({ q: query });
+    }
   };
 
   const hasPriceFilter = Boolean(minPrice || maxPrice);
@@ -122,6 +138,7 @@ export function BrowseSearchFilters({
           type="search"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={handleSearchKeyDown}
           placeholder="Search listings by title, description, or location..."
           className="h-11 pl-10 pr-10 text-sm bg-background border-border/80 shadow-sm rounded-xl focus-visible:ring-primary"
         />

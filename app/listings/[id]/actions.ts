@@ -1,11 +1,13 @@
 "use server";
 
-import { auth } from "@clerk/nextjs/server";
+// [IMPORT] Load Clerk authentication, ISO date parsing helpers, Supabase client, and price calculation utilities.
+import { auth, currentUser } from "@clerk/nextjs/server";
 import { parseISO, isBefore, startOfToday } from "date-fns";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { RESERVATION_BLOCKING_STATUSES } from "@/lib/supabase/marketplace";
 import { calculateInclusiveRentalDays, calculateRentalTotalPrice } from "@/lib/utils";
 
+// [TYPE] Interface specifying input parameters for requesting an equipment booking.
 export interface CreateBookingParams {
   listingId: string;
   startDate: string; // YYYY-MM-DD
@@ -13,12 +15,24 @@ export interface CreateBookingParams {
   totalPrice?: number; // Client-supplied hint; server recalculates authoritatively
 }
 
+// [TYPE] Interface for the structured response returned to the booking card component.
 export interface CreateBookingResult {
   success?: boolean;
   bookingId?: string;
   serverTotalPrice?: number;
   error?: string;
-  code?: "AUTH_REQUIRED" | "OWN_LISTING" | "OVERLAP" | "INVALID_DATES" | "UNAVAILABLE" | "ERROR";
+  code?:
+    | "AUTH_REQUIRED"
+    | "DEMO_LISTING"
+    | "INVALID_ID"
+    | "NOT_FOUND"
+    | "PERMISSION_DENIED"
+    | "DB_ERROR"
+    | "OWN_LISTING"
+    | "OVERLAP"
+    | "INVALID_DATES"
+    | "UNAVAILABLE"
+    | "ERROR";
 }
 
 /**
@@ -35,13 +49,16 @@ export interface CreateBookingResult {
  * 7. Server-side overlap checks and PostgreSQL exclusion constraint handling.
  * 8. NO false success via mock data fallback — failed DB operations return clear errors.
  */
+// [FUNC] + [ASYNC] + [PARAM] Authoritative Server Action creating a pending booking record.
 export async function createBookingAction(
   params: CreateBookingParams
 ): Promise<CreateBookingResult> {
   const { listingId, startDate, endDate } = params;
 
   // 1. Requires login
+  // [AUTH] + [ASYNC] Authenticate the requesting renter session via Clerk.
   const { userId } = await auth();
+  // [IF] + [RETURN] Reject immediately if the user is not authenticated.
   if (!userId) {
     return {
       error: "You must be signed in to request a booking.",
@@ -50,6 +67,7 @@ export async function createBookingAction(
   }
 
   // 2. Validate date inputs
+  // [VALIDATION] + [IF] + [RETURN] Verify that both start and end dates were selected.
   if (!startDate || !endDate) {
     return {
       error: "Please select both a start date and an end date.",
@@ -57,10 +75,12 @@ export async function createBookingAction(
     };
   }
 
+  // [METHOD] Parse ISO date strings into Date objects.
   const start = parseISO(startDate);
   const end = parseISO(endDate);
   const today = startOfToday();
 
+  // [VALIDATION] + [IF] Ensure parsed dates are mathematically valid dates.
   if (isNaN(start.getTime()) || isNaN(end.getTime())) {
     return {
       error: "Invalid rental dates specified.",
@@ -68,6 +88,7 @@ export async function createBookingAction(
     };
   }
 
+  // [VALIDATION] + [IF] Prevent bookings with start dates in the past.
   if (isBefore(start, today)) {
     return {
       error: "Rental start date cannot be in the past.",
@@ -75,6 +96,7 @@ export async function createBookingAction(
     };
   }
 
+  // [VALIDATION] + [IF] Enforce chronological ordering: end date must not precede start date.
   if (isBefore(end, start)) {
     return {
       error: "Rental end date must be on or after the start date.",
@@ -82,54 +104,217 @@ export async function createBookingAction(
     };
   }
 
-  // 3. Connect to Supabase with authenticated caller client
+  const correlationId = crypto.randomUUID();
+
+  // 3. Separate mock/demo listings from real UUID database listings
+  const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const isMockListing = listingId.startsWith("lst-") || listingId.startsWith("mock-");
+
+  if (isMockListing) {
+    console.warn("[createBookingAction] Booking requested on demo/mock listing:", {
+      correlationId,
+      listingId,
+    });
+    return {
+      error: "This is a demonstration listing and cannot accept rental bookings. Please select an active marketplace listing.",
+      code: "DEMO_LISTING",
+    };
+  }
+
+  if (!UUID_REGEX.test(listingId)) {
+    console.warn("[createBookingAction] Invalid listing identifier format:", {
+      correlationId,
+      listingId,
+    });
+    return {
+      error: "The requested equipment listing identifier is invalid.",
+      code: "INVALID_ID",
+    };
+  }
+
+  // 4. Connect to Supabase with authenticated caller client
   try {
     const supabase = await createSupabaseServerClient();
 
-    // 4. Check user profile account status
-    const { data: userProfile } = await supabase
+    // 5. Check user profile account status (fail-closed, with lazy-sync fallback)
+    const { data: initialProfile, error: profileError } = await supabase
       .from("profiles")
       .select("status")
       .eq("clerk_user_id", userId)
       .maybeSingle();
 
-    if (userProfile?.status === "restricted") {
+    let userProfile = initialProfile;
+
+    if (profileError) {
+      console.error("[createBookingAction] Profile status lookup database error:", {
+        correlationId,
+        listingId,
+        code: profileError.code,
+        errorDetails: profileError.message,
+      });
+      return {
+        error: "A database error occurred while verifying your account. Please try again later.",
+        code: "DB_ERROR",
+      };
+    }
+
+    // If profile is not found, the user may have just signed up before webhook sync finished.
+    // Perform an authoritative lazy-sync using the authenticated currentUser() session.
+    if (!userProfile) {
+      try {
+        const user = await currentUser();
+        if (user && user.id === userId) {
+          const primaryEmail =
+            user.emailAddresses.find((e) => e.id === user.primaryEmailAddressId)
+              ?.emailAddress ?? user.emailAddresses[0]?.emailAddress ?? null;
+
+          const { data: syncedProfile, error: syncError } = await supabase
+            .from("profiles")
+            .upsert(
+              {
+                clerk_user_id: user.id,
+                email: primaryEmail,
+                first_name: user.firstName ?? null,
+                last_name: user.lastName ?? null,
+                avatar_url: user.imageUrl || null,
+                role: "customer",
+                status: "active",
+                updated_at: new Date().toISOString(),
+              },
+              {
+                onConflict: "clerk_user_id",
+                ignoreDuplicates: false,
+              }
+            )
+            .select("status")
+            .single();
+
+          if (!syncError && syncedProfile) {
+            userProfile = syncedProfile;
+            console.info("[createBookingAction] Auto-synced missing user profile on demand:", {
+              correlationId,
+              userId,
+            });
+          }
+        }
+      } catch (syncErr) {
+        console.warn("[createBookingAction] Lazy profile sync attempt failed:", syncErr);
+      }
+    }
+
+    if (!userProfile) {
+      console.warn("[createBookingAction] User profile not found for authenticated user:", {
+        correlationId,
+        listingId,
+        userId,
+      });
+      return {
+        error: "Your user profile could not be found or verified. Please try again later.",
+        code: "DB_ERROR",
+      };
+    }
+
+    if (userProfile.status === "restricted") {
+      console.warn("[createBookingAction] Restricted user attempted booking:", {
+        correlationId,
+        listingId,
+        status: userProfile.status,
+      });
       return {
         error: "Your account is currently restricted from submitting rental requests.",
         code: "ERROR",
       };
     }
-    if (userProfile?.status === "banned" || userProfile?.status === "deleted") {
+    if (userProfile.status === "banned" || userProfile.status === "deleted") {
+      console.warn("[createBookingAction] Suspended user attempted booking:", {
+        correlationId,
+        listingId,
+        status: userProfile.status,
+      });
       return {
         error: "Your account is suspended and cannot initiate rental bookings.",
         code: "ERROR",
       };
     }
 
-    // 5. Fetch authoritative listing from database
+    // 6. Fetch authoritative listing from database
     const { data: listing, error: listingError } = await supabase
       .from("listings")
       .select("id, owner_id, status, price_per_day, title")
       .eq("id", listingId)
       .maybeSingle();
 
-    if (listingError || !listing) {
+    if (listingError) {
+      console.error("[createBookingAction] Database query error for listing:", {
+        correlationId,
+        listingId,
+        code: listingError.code,
+        errorDetails: listingError.message,
+      });
+
+      // Permission denied / RLS denial
+      if (listingError.code === "42501") {
+        return {
+          error: "You do not have permission to view or book this listing.",
+          code: "PERMISSION_DENIED",
+        };
+      }
+
       return {
-        error: "Equipment listing not found or is no longer available.",
-        code: "ERROR",
+        error: "A database error occurred while retrieving the listing. Please try again later.",
+        code: "DB_ERROR",
+      };
+    }
+
+    if (!listing) {
+      console.warn("[createBookingAction] Listing ID not found in database:", {
+        correlationId,
+        listingId,
+      });
+      return {
+        error: "The requested equipment listing was not found.",
+        code: "NOT_FOUND",
       };
     }
 
     // 6. Authoritative listing status check: ONLY 'available' can be booked
     if (listing.status !== "available") {
+      console.warn("[createBookingAction] Listing unavailable for booking:", {
+        correlationId,
+        listingId,
+        status: listing.status,
+      });
+
+      let safeStatusMessage: string;
+      const statusValue = listing.status as string;
+      if (statusValue === "archived") {
+        safeStatusMessage = "This equipment listing has been archived and is no longer available for booking.";
+      } else if (statusValue === "restricted") {
+        safeStatusMessage = "This equipment listing is restricted and cannot be booked.";
+      } else if (statusValue === "deleted") {
+        safeStatusMessage = "This equipment listing has been removed and is no longer available.";
+      } else if (statusValue === "maintenance") {
+        safeStatusMessage = "This equipment is currently undergoing maintenance and cannot be booked.";
+      } else if (statusValue === "inactive") {
+        safeStatusMessage = "This equipment listing is currently inactive and cannot be booked.";
+      } else {
+        safeStatusMessage = `This equipment is currently ${listing.status} and cannot be booked.`;
+      }
+
       return {
-        error: `This equipment is currently ${listing.status} and cannot be booked.`,
+        error: safeStatusMessage,
         code: "UNAVAILABLE",
       };
     }
 
     // 7. Prevent booking own listing
+    // [IF] + [RETURN] Business Rule: Equipment owners cannot rent their own machinery.
     if (listing.owner_id && listing.owner_id === userId) {
+      console.info("[createBookingAction] Owner attempted booking own listing:", {
+        correlationId,
+        listingId,
+        userId,
+      });
       return {
         error: "You cannot book your own listing.",
         code: "OWN_LISTING",
@@ -137,6 +322,7 @@ export async function createBookingAction(
     }
 
     // 8. Server-side authoritative price calculation (NEVER trust client price)
+    // [DECL] + [INIT] Convert daily rate to number and validate financial integrity.
     const pricePerDay = Number(listing.price_per_day);
     if (isNaN(pricePerDay) || pricePerDay < 0) {
       return {
@@ -145,7 +331,9 @@ export async function createBookingAction(
       };
     }
 
+    // [FUNC] Compute total calendar rental days inclusive of start and end date.
     const rentalDays = calculateInclusiveRentalDays(start, end);
+    // [VALIDATION] + [IF] Enforce minimum 1 full rental day.
     if (rentalDays < 1) {
       return {
         error: "Rental duration must be at least 1 day.",
@@ -153,10 +341,13 @@ export async function createBookingAction(
       };
     }
 
+    // [FUNC] Authoritatively compute final charge on the server: daily rate multiplied by rental days.
     const authoritativeTotalPrice = calculateRentalTotalPrice(pricePerDay, start, end);
 
     // 9. Server-side overlap check against active reservations
-    const { data: overlappingBookings } = await supabase
+    // [DB] + [METHOD] Query existing bookings overlapping the requested date interval:
+    // Formula: existing_start <= requested_end AND existing_end >= requested_start.
+    const { data: overlappingBookings, error: overlapError } = await supabase
       .from("bookings")
       .select("id")
       .eq("listing_id", listingId)
@@ -164,7 +355,26 @@ export async function createBookingAction(
       .lte("start_date", endDate)
       .gte("end_date", startDate);
 
+    if (overlapError) {
+      console.error("[createBookingAction] Database error checking booking overlap:", {
+        correlationId,
+        listingId,
+        code: overlapError.code,
+        errorDetails: overlapError.message,
+      });
+      return {
+        error: "A database error occurred while verifying reservation availability. Please try again later.",
+        code: "DB_ERROR",
+      };
+    }
+
+    // [IF] + [RETURN] Reject if any conflicting reservation is already active or accepted.
     if (overlappingBookings && overlappingBookings.length > 0) {
+      console.info("[createBookingAction] Overlapping reservation conflict detected:", {
+        correlationId,
+        listingId,
+        conflictCount: overlappingBookings.length,
+      });
       return {
         error: "These dates conflict with an existing reservation. Please select different dates.",
         code: "OVERLAP",
@@ -172,6 +382,7 @@ export async function createBookingAction(
     }
 
     // 10. Insert booking into database
+    // [DB] + [OBJ] + [METHOD] Insert the validated booking record with initial status 'pending'.
     const { data: newBooking, error: insertError } = await supabase
       .from("bookings")
       .insert({
@@ -185,6 +396,7 @@ export async function createBookingAction(
       .select("id, total_price")
       .single();
 
+    // [IF] Check for insertion errors, specifically PostgreSQL 23P01 (exclusion constraint violation).
     if (insertError) {
       const errorMsg = (insertError.message || "").toLowerCase();
       const errorCode = insertError.code || "";
@@ -198,13 +410,23 @@ export async function createBookingAction(
         errorMsg.includes("conflicting") ||
         errorMsg.includes("range")
       ) {
+        console.warn("[createBookingAction] Exclusion constraint violation on insert:", {
+          correlationId,
+          listingId,
+          code: errorCode,
+        });
         return {
           error: "These dates conflict with an existing reservation. Please select different dates.",
           code: "OVERLAP",
         };
       }
 
-      console.error("[createBookingAction] Database insert error:", insertError.message);
+      console.error("[createBookingAction] Database insert error:", {
+        correlationId,
+        listingId,
+        code: errorCode,
+        errorDetails: insertError.message,
+      });
       return {
         error: "Unable to submit your booking right now. Please try again.",
         code: "ERROR",
@@ -212,12 +434,17 @@ export async function createBookingAction(
     }
 
     if (!newBooking?.id) {
+      console.error("[createBookingAction] Booking insertion returned empty ID:", {
+        correlationId,
+        listingId,
+      });
       return {
         error: "Unable to submit your booking right now. Please try again.",
         code: "ERROR",
       };
     }
 
+    // [RETURN] Return booking confirmation with server-calculated total price.
     return {
       success: true,
       bookingId: newBooking.id,
@@ -236,7 +463,10 @@ export async function createBookingAction(
       };
     }
 
-    console.error("[createBookingAction] Server exception:", err);
+    console.error("[createBookingAction] Server exception:", {
+      listingId,
+      error: err instanceof Error ? err.message : String(err),
+    });
     return {
       error: "Unable to submit your booking right now. Please try again.",
       code: "ERROR",

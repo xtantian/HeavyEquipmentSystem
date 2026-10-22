@@ -980,14 +980,21 @@ function simulateClerkWebhookUserCreated({
   clerkPublicMetadata = {},
   clientSuppliedRole = null,
   pendingInvitations = [],
+  dbTrackingError = false,
 }) {
-  const isInvitedViaMetadata = clerkPublicMetadata.role === "admin" || clerkPublicMetadata.invitedAsAdmin === true;
+  if (dbTrackingError) {
+    return { error: "Database error tracking invitation", assignedRole: "customer" };
+  }
+
+  // Security Priority: Never trust clientSuppliedRole or clerkPublicMetadata alone.
+  // ONLY grant admin role if there is a verified, pending invitation in admin_invitations.
+  const normalizedEmail = (email || "").trim().toLowerCase();
   const matchingInvitation = pendingInvitations.find(
-    (inv) => inv.email.toLowerCase() === email.toLowerCase() && inv.status === "pending"
+    (inv) => inv.email.toLowerCase() === normalizedEmail && inv.status === "pending"
   );
 
   let finalAssignedRole = "customer";
-  if (isInvitedViaMetadata || matchingInvitation) {
+  if (matchingInvitation) {
     finalAssignedRole = "admin";
   }
 
@@ -1038,6 +1045,577 @@ assert(
   revokedSignup.assignedRole === "customer",
   "User signing up after invitation revocation remains customer"
 );
+
+// Case 4: Security priority - user attempting admin escalation via public_metadata without DB invitation
+const unverifiedEscalation = simulateClerkWebhookUserCreated({
+  userId: "user_attacker",
+  email: "attacker@gmail.com",
+  clerkPublicMetadata: { invitedAsAdmin: true, role: "admin" },
+  pendingInvitations: [], // No server invitation exists!
+});
+assert(
+  unverifiedEscalation.assignedRole === "customer",
+  "Unauthorized metadata escalation without pending server invitation is REJECTED"
+);
+
+// -----------------------------------------------------------------------------
+// 13. LISTING BOOKING DIAGNOSTIC OUTCOME DIFFERENTIATION & CORRELATION LOGGING
+// [SIMULATION - OFFLINE UNIT TESTS - NOT LIVE SUPABASE INTEGRATION]
+// -----------------------------------------------------------------------------
+console.log("\n▶ SUITE 13: Listing Booking Diagnostic Outcome Differentiation & Correlation Logging (Simulation)");
+
+function simulateCreateBookingAction({
+  userId,
+  userProfile = { status: "active" },
+  profileQueryError = null,
+  listingId,
+  mockDbListing = null,
+  dbQueryError = null,
+  overlappingBookings = [],
+  overlapQueryError = null,
+  dbInsertError = null,
+  startDate = "2026-11-01",
+  endDate = "2026-11-03",
+}) {
+  const correlationId = "corr-" + Math.random().toString(36).substring(2, 9);
+  const diagnosticLogs = [];
+  let insertAttempted = false;
+
+  // 1. Auth check
+  if (!userId) {
+    return { error: "You must be signed in to request a booking.", code: "AUTH_REQUIRED", correlationId, insertAttempted, logs: diagnosticLogs };
+  }
+
+  // 2. Separate mock/demo listings from real UUID database listings
+  const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const isMockListing = listingId.startsWith("lst-") || listingId.startsWith("mock-");
+
+  if (isMockListing) {
+    diagnosticLogs.push({ correlationId, listingId, code: "DEMO_LISTING" });
+    return {
+      error: "This is a demonstration listing and cannot accept rental bookings. Please select an active marketplace listing.",
+      code: "DEMO_LISTING",
+      correlationId,
+      insertAttempted,
+      logs: diagnosticLogs,
+    };
+  }
+
+  if (!UUID_REGEX.test(listingId)) {
+    diagnosticLogs.push({ correlationId, listingId, code: "INVALID_ID" });
+    return {
+      error: "The requested equipment listing identifier is invalid.",
+      code: "INVALID_ID",
+      correlationId,
+      insertAttempted,
+      logs: diagnosticLogs,
+    };
+  }
+
+  // 3. Profile check (fail-closed on query error or missing profile)
+  if (profileQueryError) {
+    diagnosticLogs.push({ correlationId, listingId, code: profileQueryError.code, errorDetails: profileQueryError.message });
+    return {
+      error: "A database error occurred while verifying your account. Please try again later.",
+      code: "DB_ERROR",
+      correlationId,
+      insertAttempted,
+      logs: diagnosticLogs,
+    };
+  }
+
+  if (!userProfile) {
+    diagnosticLogs.push({ correlationId, listingId, code: "PROFILE_NOT_FOUND", userId });
+    return {
+      error: "Your user profile could not be found or verified. Please try again later.",
+      code: "DB_ERROR",
+      correlationId,
+      insertAttempted,
+      logs: diagnosticLogs,
+    };
+  }
+
+  if (userProfile.status === "restricted") {
+    diagnosticLogs.push({ correlationId, listingId, status: userProfile.status });
+    return { error: "Your account is currently restricted from submitting rental requests.", code: "ERROR", correlationId, insertAttempted, logs: diagnosticLogs };
+  }
+  if (userProfile.status === "banned" || userProfile.status === "deleted") {
+    diagnosticLogs.push({ correlationId, listingId, status: userProfile.status });
+    return { error: "Your account is suspended and cannot initiate rental bookings.", code: "ERROR", correlationId, insertAttempted, logs: diagnosticLogs };
+  }
+
+  // 4. Database query outcome differentiation
+  if (dbQueryError) {
+    diagnosticLogs.push({ correlationId, listingId, code: dbQueryError.code, errorDetails: dbQueryError.message });
+    if (dbQueryError.code === "42501") {
+      return { error: "You do not have permission to view or book this listing.", code: "PERMISSION_DENIED", correlationId, insertAttempted, logs: diagnosticLogs };
+    }
+    return { error: "A database error occurred while retrieving the listing. Please try again later.", code: "DB_ERROR", correlationId, insertAttempted, logs: diagnosticLogs };
+  }
+
+  if (!mockDbListing) {
+    diagnosticLogs.push({ correlationId, listingId, code: "NOT_FOUND" });
+    return { error: "The requested equipment listing was not found.", code: "NOT_FOUND", correlationId, insertAttempted, logs: diagnosticLogs };
+  }
+
+  // 5. Status check
+  if (mockDbListing.status !== "available") {
+    diagnosticLogs.push({ correlationId, listingId, status: mockDbListing.status });
+    let safeStatusMessage;
+    if (mockDbListing.status === "archived") {
+      safeStatusMessage = "This equipment listing has been archived and is no longer available for booking.";
+    } else if (mockDbListing.status === "restricted") {
+      safeStatusMessage = "This equipment listing is restricted and cannot be booked.";
+    } else if (mockDbListing.status === "deleted") {
+      safeStatusMessage = "This equipment listing has been removed and is no longer available.";
+    } else if (mockDbListing.status === "maintenance") {
+      safeStatusMessage = "This equipment is currently undergoing maintenance and cannot be booked.";
+    } else if (mockDbListing.status === "inactive") {
+      safeStatusMessage = "This equipment listing is currently inactive and cannot be booked.";
+    } else {
+      safeStatusMessage = `This equipment is currently ${mockDbListing.status} and cannot be booked.`;
+    }
+    return { error: safeStatusMessage, code: "UNAVAILABLE", correlationId, insertAttempted, logs: diagnosticLogs };
+  }
+
+  // 6. Prevent booking own listing
+  if (mockDbListing.owner_id && mockDbListing.owner_id === userId) {
+    diagnosticLogs.push({ correlationId, listingId, code: "OWN_LISTING" });
+    return { error: "You cannot book your own listing.", code: "OWN_LISTING", correlationId, insertAttempted, logs: diagnosticLogs };
+  }
+
+  // 7. Overlap check query failure & detection
+  if (overlapQueryError) {
+    diagnosticLogs.push({ correlationId, listingId, code: overlapQueryError.code, errorDetails: overlapQueryError.message });
+    return {
+      error: "A database error occurred while verifying reservation availability. Please try again later.",
+      code: "DB_ERROR",
+      correlationId,
+      insertAttempted,
+      logs: diagnosticLogs,
+    };
+  }
+
+  if (overlappingBookings.length > 0) {
+    diagnosticLogs.push({ correlationId, listingId, code: "OVERLAP" });
+    return { error: "These dates conflict with an existing reservation. Please select different dates.", code: "OVERLAP", correlationId, insertAttempted, logs: diagnosticLogs };
+  }
+
+  // 8. DB insert attempt
+  insertAttempted = true;
+  if (dbInsertError) {
+    if (dbInsertError.code === "23P01") {
+      return { error: "These dates conflict with an existing reservation. Please select different dates.", code: "OVERLAP", correlationId, insertAttempted, logs: diagnosticLogs };
+    }
+    return { error: "Unable to submit your booking right now. Please try again.", code: "ERROR", correlationId, insertAttempted, logs: diagnosticLogs };
+  }
+
+  return { success: true, bookingId: "bk-new-123", serverTotalPrice: 15000, correlationId, insertAttempted, logs: diagnosticLogs };
+}
+
+// Test 13.1: Authorized user booking existing available listing
+const validBookingRes = simulateCreateBookingAction({
+  userId: "user_renter_1",
+  listingId: "12c46209-85b4-4bb5-860a-54325662edc9",
+  mockDbListing: { id: "12c46209-85b4-4bb5-860a-54325662edc9", owner_id: "user_owner_1", status: "available", price_per_day: 5000 },
+});
+assert(validBookingRes.success && validBookingRes.bookingId, "[Simulation] Authorized booking succeeds");
+assert(validBookingRes.insertAttempted === true, "[Simulation] Authorized booking attempts database insertion");
+
+// Test 13.2: Missing listing ID produces distinguishable diagnostic outcome
+const missingListingRes = simulateCreateBookingAction({
+  userId: "user_renter_1",
+  listingId: "00000000-0000-0000-0000-000000000000",
+  mockDbListing: null,
+});
+assert(missingListingRes.code === "NOT_FOUND", "[Simulation] Missing listing returns distinct 'NOT_FOUND' code");
+assert(missingListingRes.error === "The requested equipment listing was not found.", "[Simulation] Missing listing returns distinct 'not found' message without collapsing into vague error");
+assert(missingListingRes.insertAttempted === false, "[Simulation] Missing listing does NOT attempt booking insertion");
+assert(missingListingRes.logs.length > 0 && missingListingRes.logs[0].correlationId, "[Simulation] Missing listing records structured server-side diagnostic log with correlation ID");
+
+// Test 13.3: RLS denial produces distinct permission error
+const rlsDeniedRes = simulateCreateBookingAction({
+  userId: "user_renter_1",
+  listingId: "e0000000-0000-0000-0000-000000000001",
+  dbQueryError: { code: "42501", message: "permission denied for table listings" },
+});
+assert(rlsDeniedRes.code === "PERMISSION_DENIED", "[Simulation] RLS-denied query produces distinct PERMISSION_DENIED code");
+assert(rlsDeniedRes.error === "You do not have permission to view or book this listing.", "[Simulation] RLS-denied query produces distinct user-safe permission error");
+assert(rlsDeniedRes.insertAttempted === false, "[Simulation] RLS denial does NOT attempt booking insertion");
+assert(rlsDeniedRes.logs[0].code === "42501", "[Simulation] RLS-denied query logs Postgres 42501 error code with correlation ID");
+
+// Test 13.4: Demo listing returns distinct DEMO_LISTING code without querying database
+const demoListingRes = simulateCreateBookingAction({
+  userId: "user_renter_1",
+  listingId: "lst-cat-320d-01",
+});
+assert(demoListingRes.code === "DEMO_LISTING", "[Simulation] Mock/demo listing returns distinct DEMO_LISTING code");
+assert(demoListingRes.error.includes("demonstration listing"), "[Simulation] Demo listing returns clear guidance message");
+assert(demoListingRes.insertAttempted === false, "[Simulation] Demo listing does NOT attempt booking insertion");
+
+// Test 13.5: Invalid format returns INVALID_ID code
+const invalidIdRes = simulateCreateBookingAction({
+  userId: "user_renter_1",
+  listingId: "not-a-valid-uuid-or-mock",
+});
+assert(invalidIdRes.code === "INVALID_ID", "[Simulation] Invalid non-UUID identifier returns distinct INVALID_ID code");
+assert(invalidIdRes.insertAttempted === false, "[Simulation] Invalid ID does NOT attempt booking insertion");
+
+// Test 13.6: Database query error returns DB_ERROR code
+const dbErrRes = simulateCreateBookingAction({
+  userId: "user_renter_1",
+  listingId: "e0000000-0000-0000-0000-000000000002",
+  dbQueryError: { code: "08006", message: "connection failure" },
+});
+assert(dbErrRes.code === "DB_ERROR", "[Simulation] General database error returns distinct DB_ERROR code");
+assert(dbErrRes.insertAttempted === false, "[Simulation] Listing query failure does NOT attempt booking insertion");
+
+// Test 13.7: Profile query error (fail-closed) returns DB_ERROR and blocks insert
+const profileErrRes = simulateCreateBookingAction({
+  userId: "user_renter_1",
+  listingId: "12c46209-85b4-4bb5-860a-54325662edc9",
+  profileQueryError: { code: "50000", message: "profiles table connection failed" },
+  mockDbListing: { id: "12c46209-85b4-4bb5-860a-54325662edc9", owner_id: "user_owner_1", status: "available", price_per_day: 5000 },
+});
+assert(profileErrRes.code === "DB_ERROR", "[Simulation] Profile query failure returns DB_ERROR");
+assert(profileErrRes.insertAttempted === false, "[Simulation] Profile query failure does NOT attempt booking insertion");
+assert(profileErrRes.logs[0].code === "50000", "[Simulation] Profile query failure logs error code with correlation ID");
+
+// Test 13.8: Missing profile (userProfile == null) fail-closed returns DB_ERROR and blocks insert
+const missingProfileRes = simulateCreateBookingAction({
+  userId: "user_renter_1",
+  userProfile: null,
+  listingId: "12c46209-85b4-4bb5-860a-54325662edc9",
+  mockDbListing: { id: "12c46209-85b4-4bb5-860a-54325662edc9", owner_id: "user_owner_1", status: "available", price_per_day: 5000 },
+});
+assert(missingProfileRes.code === "DB_ERROR", "[Simulation] Missing profile returns DB_ERROR");
+assert(missingProfileRes.insertAttempted === false, "[Simulation] Missing profile does NOT attempt booking insertion");
+assert(missingProfileRes.error.includes("could not be found or verified"), "[Simulation] Missing profile returns user-safe verification message");
+
+// Test 13.9: Overlap query failure returns DB_ERROR and blocks insert before insertion
+const overlapQueryErrRes = simulateCreateBookingAction({
+  userId: "user_renter_1",
+  listingId: "12c46209-85b4-4bb5-860a-54325662edc9",
+  mockDbListing: { id: "12c46209-85b4-4bb5-860a-54325662edc9", owner_id: "user_owner_1", status: "available", price_per_day: 5000 },
+  overlapQueryError: { code: "08006", message: "bookings availability query timeout" },
+});
+assert(overlapQueryErrRes.code === "DB_ERROR", "[Simulation] Overlap query failure returns DB_ERROR");
+assert(overlapQueryErrRes.insertAttempted === false, "[Simulation] Overlap query failure does NOT attempt booking insertion");
+assert(overlapQueryErrRes.logs[0].code === "08006", "[Simulation] Overlap query failure logs database error code with correlation ID");
+
+// Test 13.10: Specific unavailable messages (archived, maintenance, restricted, deleted, inactive)
+const archivedRes = simulateCreateBookingAction({
+  userId: "user_renter_1",
+  listingId: "a0000000-0000-0000-0000-000000000001",
+  mockDbListing: { id: "a0000000-0000-0000-0000-000000000001", owner_id: "owner-1", status: "archived", price_per_day: 1000 },
+});
+assert(archivedRes.error.includes("archived"), "[Simulation] Archived listing returns specific archival error message");
+assert(archivedRes.code === "UNAVAILABLE", "[Simulation] Archived listing returns UNAVAILABLE code");
+assert(archivedRes.insertAttempted === false, "[Simulation] Archived listing does NOT attempt booking insertion");
+
+const maintRes = simulateCreateBookingAction({
+  userId: "user_renter_1",
+  listingId: "a0000000-0000-0000-0000-000000000002",
+  mockDbListing: { id: "a0000000-0000-0000-0000-000000000002", owner_id: "owner-1", status: "maintenance", price_per_day: 1000 },
+});
+assert(maintRes.error.includes("maintenance"), "[Simulation] Maintenance listing returns specific maintenance error message");
+assert(maintRes.insertAttempted === false, "[Simulation] Maintenance listing does NOT attempt booking insertion");
+
+// Test 13.11: Owner cannot book own listing
+const ownListingRes = simulateCreateBookingAction({
+  userId: "user_owner_1",
+  listingId: "a0000000-0000-0000-0000-000000000003",
+  mockDbListing: { id: "a0000000-0000-0000-0000-000000000003", owner_id: "user_owner_1", status: "available", price_per_day: 1000 },
+});
+assert(ownListingRes.code === "OWN_LISTING", "[Simulation] Listing owned by caller is rejected with OWN_LISTING code");
+assert(ownListingRes.insertAttempted === false, "[Simulation] Own listing does NOT attempt booking insertion");
+
+// Test 13.12: Booking date overlap detected
+const overlapRes = simulateCreateBookingAction({
+  userId: "user_renter_1",
+  listingId: "a0000000-0000-0000-0000-000000000004",
+  mockDbListing: { id: "a0000000-0000-0000-0000-000000000004", owner_id: "owner-1", status: "available", price_per_day: 1000 },
+  overlappingBookings: [{ id: "bk-conflict" }],
+});
+assert(overlapRes.code === "OVERLAP", "[Simulation] Date range conflict is detected and returns OVERLAP code");
+assert(overlapRes.insertAttempted === false, "[Simulation] Date conflict does NOT attempt booking insertion");
+
+// -----------------------------------------------------------------------------
+// 14. SAVED LISTINGS SCHEMA AVAILABILITY & RESILIENCE
+// -----------------------------------------------------------------------------
+console.log("\n▶ SUITE 14: Saved Listings Schema Availability & Resilience");
+
+function simulateToggleSaveListing({
+  userId,
+  listingId,
+  tableExists = true,
+  isAlreadySaved = false,
+  triggerRaceConflict = false,
+}) {
+  if (!userId) {
+    return { success: false, saved: false, error: "You must be signed in to save listings.", code: "AUTH_REQUIRED" };
+  }
+
+  // Simulate missing table schema (PGRST205)
+  if (!tableExists) {
+    return {
+      success: false,
+      saved: false,
+      error: "The saved listings feature is currently unavailable (database schema not applied). Please try again later.",
+      code: "ERROR",
+      schemaUnavailable: true,
+    };
+  }
+
+  if (isAlreadySaved) {
+    // Unsave
+    return { success: true, saved: false };
+  } else {
+    // Save (insert)
+    if (triggerRaceConflict) {
+      // 23505 unique collision handled idempotently
+      return { success: true, saved: true };
+    }
+    return { success: true, saved: true };
+  }
+}
+
+// Test 14.1: Toggle save succeeds when schema is available
+const saveSuccess = simulateToggleSaveListing({
+  userId: "user_1",
+  listingId: "12c46209-85b4-4bb5-860a-54325662edc9",
+  tableExists: true,
+  isAlreadySaved: false,
+});
+assert(saveSuccess.success && saveSuccess.saved === true, "Saved-listing toggle succeeds when schema is available");
+
+// Test 14.2: Toggle unsave succeeds when already saved
+const unsaveSuccess = simulateToggleSaveListing({
+  userId: "user_1",
+  listingId: "12c46209-85b4-4bb5-860a-54325662edc9",
+  tableExists: true,
+  isAlreadySaved: true,
+});
+assert(unsaveSuccess.success && unsaveSuccess.saved === false, "Saved-listing toggle successfully removes saved item");
+
+// Test 14.3: Clear error when schema is missing (PGRST205)
+const schemaMissingRes = simulateToggleSaveListing({
+  userId: "user_1",
+  listingId: "12c46209-85b4-4bb5-860a-54325662edc9",
+  tableExists: false,
+});
+assert(!schemaMissingRes.success, "Saved-listing toggle fails when schema is unavailable");
+assert(schemaMissingRes.error.includes("schema not applied"), "Clear, diagnostic error returned when saved_listings table is missing");
+
+// Test 14.4: Optimistic rollback simulation on failure
+let clientSavedState = false;
+let clientFeedback = null;
+function simulateClientHeartClick(tableExists) {
+  const initial = clientSavedState;
+  clientSavedState = !initial; // Optimistic update
+  const res = simulateToggleSaveListing({ userId: "u1", listingId: "l1", tableExists });
+  if (!res.success) {
+    clientSavedState = initial; // Roll back
+    clientFeedback = res.error;
+  } else {
+    clientSavedState = res.saved;
+  }
+  return { finalState: clientSavedState, feedback: clientFeedback };
+}
+
+const clientFailureRun = simulateClientHeartClick(false);
+assert(clientFailureRun.finalState === false, "Client optimistic saved state rolls back to false on server failure");
+assert(clientFailureRun.feedback !== null, "User feedback message is set on failure so button does not silently do nothing");
+
+// -----------------------------------------------------------------------------
+// 15. IMAGE UPLOAD INTEGRITY & LISTING RELATIONS
+// -----------------------------------------------------------------------------
+console.log("\n▶ SUITE 15: Image Upload Integrity & Listing Relations");
+
+function simulateImageUploadWorkflow({ files = [], storageUploadFails = false, externalUrls = [] }) {
+  const uploadedUrls = [];
+  let submitError = null;
+
+  for (const f of files) {
+    if (storageUploadFails) {
+      submitError = `Failed to upload photo "${f.name}". Storage service error.`;
+      return { success: false, error: submitError, images: [] };
+    }
+    uploadedUrls.push(`https://storage.supabase.co/v1/object/public/listing-images/${f.name}`);
+  }
+
+  for (const ext of externalUrls) {
+    uploadedUrls.push(ext);
+  }
+
+  if (uploadedUrls.length === 0) {
+    uploadedUrls.push("/images/equipment_loader.jpg");
+  }
+
+  // Deduplicate preserving first occurrence
+  const seen = new Set();
+  const uniqueImages = uploadedUrls.filter((url) => {
+    const trimmed = (url || "").trim();
+    if (!trimmed || seen.has(trimmed)) return false;
+    seen.add(trimmed);
+    return true;
+  });
+
+  const relationRows = uniqueImages.map((url, idx) => ({
+    image_url: url,
+    is_primary: idx === 0,
+    sort_order: idx,
+  }));
+
+  return { success: true, images: uniqueImages, relationRows };
+}
+
+// Test 15.1: Failed upload is NOT silently treated as success
+const failedUploadRes = simulateImageUploadWorkflow({
+  files: [{ name: "excavator-boom.jpg" }],
+  storageUploadFails: true,
+});
+assert(!failedUploadRes.success, "Failed photo upload causes submission to fail");
+assert(failedUploadRes.error.includes("excavator-boom.jpg"), "Error explicitly identifies the failed image file");
+assert(!failedUploadRes.images.includes("/images/equipment_loader.jpg"), "Failed upload does NOT silently insert fallback loader image");
+
+// Test 15.2: Successful uploads create ordered relation rows
+const successUploadRes = simulateImageUploadWorkflow({
+  files: [{ name: "front.jpg" }, { name: "side.jpg" }],
+  storageUploadFails: false,
+});
+assert(successUploadRes.success && successUploadRes.images.length === 2, "Successful photo upload persists all image URLs");
+assert(successUploadRes.relationRows[0].is_primary === true, "First image is marked is_primary: true");
+assert(successUploadRes.relationRows[0].sort_order === 0, "First image has sort_order: 0");
+assert(successUploadRes.relationRows[1].sort_order === 1, "Second image has sort_order: 1");
+
+// Test 15.3: Duplicate URLs in payload are deduplicated
+const dupeUploadRes = simulateImageUploadWorkflow({
+  files: [{ name: "same.jpg" }],
+  externalUrls: ["https://storage.supabase.co/v1/object/public/listing-images/same.jpg", "https://img.com/other.jpg"],
+});
+assert(dupeUploadRes.images.length === 2, "Duplicate URLs are deduplicated to single occurrence");
+assert(dupeUploadRes.relationRows.length === 2, "Relation rows insert only deduplicated images");
+
+// -----------------------------------------------------------------------------
+// 16. DASHBOARD, CHAT & ADMIN AUTHORIZATION BOUNDARIES
+// -----------------------------------------------------------------------------
+console.log("\n▶ SUITE 16: Dashboard, Chat & Admin Authorization Boundaries");
+
+// Test 16.1: Dashboard optimistic state rollback on error
+let dashboardRentals = [{ id: "bk-1", status: "pending" }];
+function simulateDashboardCancel({ bookingId, shouldFail = false }) {
+  const previous = dashboardRentals;
+  dashboardRentals = dashboardRentals.map((b) => (b.id === bookingId ? { ...b, status: "cancelled" } : b));
+  if (shouldFail) {
+    dashboardRentals = previous; // Roll back
+    return { success: false, error: "Database network failure." };
+  }
+  return { success: true };
+}
+
+const cancelFail = simulateDashboardCancel({ bookingId: "bk-1", shouldFail: true });
+assert(!cancelFail.success, "Dashboard action failure reported");
+assert(dashboardRentals[0].status === "pending", "Dashboard optimistic status rolls back to 'pending' on action failure");
+
+// Test 16.2: Conversation RPC requires participant identity
+function simulateGetOrCreateConversation({ callerId, booking, isAdmin = false }) {
+  if (!callerId) return { success: false, error: "Authentication required", code: "42501" };
+  if (!booking) return { success: false, error: "Booking not found", code: "02000" };
+  const isParticipant = callerId === booking.renter_id || callerId === booking.owner_id;
+  if (!isParticipant && !isAdmin) {
+    return { success: false, error: "Unauthorized: Caller is not a participant", code: "42501" };
+  }
+  if (!["accepted", "paid", "confirmed", "active", "completed"].includes(booking.status) && !isAdmin) {
+    return { success: false, error: "Messaging is only unlocked for accepted rental transactions", code: "42501" };
+  }
+  return { success: true, conversationId: "conv-" + booking.id };
+}
+
+const strangerChat = simulateGetOrCreateConversation({
+  callerId: "user_intruder",
+  booking: { id: "bk-1", renter_id: "user_a", owner_id: "user_b", status: "accepted" },
+});
+assert(!strangerChat.success && strangerChat.code === "42501", "Unauthorized stranger CANNOT open booking conversation");
+
+const pendingBookingChat = simulateGetOrCreateConversation({
+  callerId: "user_a",
+  booking: { id: "bk-1", renter_id: "user_a", owner_id: "user_b", status: "pending" },
+});
+assert(!pendingBookingChat.success, "Conversation cannot be unlocked while booking status is pending review");
+
+const acceptedBookingChat = simulateGetOrCreateConversation({
+  callerId: "user_a",
+  booking: { id: "bk-1", renter_id: "user_a", owner_id: "user_b", status: "accepted" },
+});
+assert(acceptedBookingChat.success, "Conversation unlocks for participant once booking is accepted");
+
+// Test 16.3: Message immutability trigger simulation
+function simulateMessageMutation({ op, callerId, originalMessage, newContent, newReadAt }) {
+  if (op === "DELETE") {
+    return { allowed: false, error: "Messages cannot be deleted. History must be preserved for dispute resolution." };
+  }
+  if (op === "UPDATE") {
+    if (newContent !== undefined && newContent !== originalMessage.content) {
+      return { allowed: false, error: "Message content is immutable." };
+    }
+    if (newReadAt && callerId === originalMessage.sender_id) {
+      return { allowed: false, error: "Senders cannot mark their own messages as read." };
+    }
+    return { allowed: true, message: { ...originalMessage, read_at: newReadAt } };
+  }
+}
+
+const deleteMsgRes = simulateMessageMutation({ op: "DELETE", callerId: "user_a", originalMessage: { id: "m1" } });
+assert(!deleteMsgRes.allowed, "Messages CANNOT be deleted (preserves dispute resolution history)");
+
+const editMsgRes = simulateMessageMutation({
+  op: "UPDATE",
+  callerId: "user_a",
+  originalMessage: { id: "m1", content: "Original terms", sender_id: "user_a" },
+  newContent: "Altered terms",
+});
+assert(!editMsgRes.allowed, "Message content CANNOT be altered once sent (message immutability guaranteed)");
+
+// -----------------------------------------------------------------------------
+// 17. CLERK AUTHENTICATION & REDIRECT PRESERVATION
+// -----------------------------------------------------------------------------
+console.log("\n▶ SUITE 17: Clerk Authentication & Redirect Invariant Verification");
+
+function simulateProxyRouteProtection(pathname, isSignedIn) {
+  const protectedRoutes = ["/listings/new", "/dashboard", "/admin"];
+  const isProtected = protectedRoutes.some((route) => pathname.startsWith(route));
+
+  if (!isProtected) {
+    return { allowed: true };
+  }
+
+  if (isSignedIn) {
+    return { allowed: true };
+  }
+
+  // Redirect to sign-in with preserved destination
+  const redirectUrl = `/sign-in?redirect_url=${encodeURIComponent(pathname)}`;
+  return { allowed: false, redirectUrl };
+}
+
+// Test 17.1: Protected routes require login and preserve destination
+const unauthedNewListing = simulateProxyRouteProtection("/listings/new", false);
+assert(!unauthedNewListing.allowed, "/listings/new requires authentication");
+assert(unauthedNewListing.redirectUrl.includes("redirect_url=%2Flistings%2Fnew"), "Redirect preservation retains intended /listings/new destination");
+
+const unauthedDashboard = simulateProxyRouteProtection("/dashboard", false);
+assert(!unauthedDashboard.allowed && unauthedDashboard.redirectUrl.includes("redirect_url=%2Fdashboard"), "Dashboard redirect preserves /dashboard destination");
+
+const unauthedAdmin = simulateProxyRouteProtection("/admin/users", false);
+assert(!unauthedAdmin.allowed && unauthedAdmin.redirectUrl.includes("redirect_url=%2Fadmin%2Fusers"), "Admin route redirect preserves /admin/users destination");
+
+// Test 17.2: Public routes never force sign-in redirects
+assert(simulateProxyRouteProtection("/", false).allowed, "Landing page is public");
+assert(simulateProxyRouteProtection("/listings", false).allowed, "Marketplace browse page is public");
+assert(simulateProxyRouteProtection("/listings/12c46209-85b4-4bb5-860a-54325662edc9", false).allowed, "Listing detail page is public");
+assert(simulateProxyRouteProtection("/sign-in", false).allowed, "Sign-in route is public and does not self-redirect");
+assert(simulateProxyRouteProtection("/sign-up", false).allowed, "Sign-up route is public and does not self-redirect");
 
 console.log("\n===============================================================================");
 console.log(`SUMMARY: ${passedTests}/${totalTests} Tests Passed (${failedTests} Failed)`);

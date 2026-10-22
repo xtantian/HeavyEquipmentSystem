@@ -20,6 +20,7 @@ interface ListingsPageProps {
     end?: string;
     min?: string;
     max?: string;
+    page?: string;
   }>;
 }
 
@@ -33,8 +34,9 @@ export default async function ListingsPage({ searchParams }: ListingsPageProps) 
   const currentEnd = resolvedParams.end || "";
   const currentMin = resolvedParams.min || "";
   const currentMax = resolvedParams.max || "";
+  const currentPage = Math.max(1, parseInt(resolvedParams.page || "1", 10) || 1);
 
-  // Helper to create category hrefs preserving search and price
+  // Helper to create category hrefs preserving search and price, resetting to page 1
   const createFilterHref = (newCategory?: string) => {
     const params = new URLSearchParams();
     if (newCategory) params.set("category", newCategory);
@@ -47,7 +49,21 @@ export default async function ListingsPage({ searchParams }: ListingsPageProps) 
     return `/listings${qs ? `?${qs}` : ""}`;
   };
 
-  // Helper to remove a single param from active filter badges
+  // Helper to create page hrefs preserving all active filters
+  const createPageHref = (targetPage: number) => {
+    const params = new URLSearchParams();
+    if (currentCategory) params.set("category", currentCategory);
+    if (currentQuery) params.set("q", currentQuery);
+    if (currentMin) params.set("min", currentMin);
+    if (currentMax) params.set("max", currentMax);
+    if (currentStart) params.set("start", currentStart);
+    if (currentEnd) params.set("end", currentEnd);
+    if (targetPage > 1) params.set("page", String(targetPage));
+    const qs = params.toString();
+    return `/listings${qs ? `?${qs}` : ""}`;
+  };
+
+  // Helper to remove a single param from active filter badges, resetting to page 1
   const createParamHref = (omitKey: "category" | "q" | "price" | "dates") => {
     const params = new URLSearchParams();
     if (omitKey !== "category" && currentCategory) params.set("category", currentCategory);
@@ -64,8 +80,8 @@ export default async function ListingsPage({ searchParams }: ListingsPageProps) 
     return `/listings${qs ? `?${qs}` : ""}`;
   };
 
-  // Fetch categories, listings, and the current user's saved listing IDs concurrently
-  const [categories, listings, { savedIds }] = await Promise.all([
+  // Fetch categories, listings with pagination, and the current user's saved listing IDs concurrently
+  const [categories, listingsResult, { savedIds }] = await Promise.all([
     getMarketplaceCategories(),
     getMarketplaceListings({
       category: currentCategory,
@@ -74,9 +90,15 @@ export default async function ListingsPage({ searchParams }: ListingsPageProps) 
       end: currentEnd,
       min: currentMin,
       max: currentMax,
+      page: currentPage,
+      limit: 24,
     }),
     getSavedListingIds(),
   ]);
+
+  const listings = listingsResult.items;
+  const totalCount = listingsResult.totalCount;
+  const totalPages = listingsResult.totalPages;
 
   const activeCategoryObj = categories.find((c) => c.slug === currentCategory);
   const activeFiltersCount =
@@ -228,12 +250,47 @@ export default async function ListingsPage({ searchParams }: ListingsPageProps) 
           <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
             <div className="mb-6 flex items-center justify-between">
               <span className="text-xs sm:text-sm font-semibold text-muted-foreground">
-                Showing <span className="text-foreground">{listings.length}</span> rental units
+                Showing <span className="text-foreground">{listings.length}</span> of{" "}
+                <span className="text-foreground">{totalCount}</span> rental units
+                {totalPages > 1 && ` • Page ${currentPage} of ${totalPages}`}
               </span>
             </div>
 
             {/* Grid — client component so hearts can use Clerk hooks */}
             <ListingCardsGrid listings={listings} initialSavedIds={savedIds} />
+
+            {/* Server-Side Pagination Controls */}
+            {totalPages > 1 && (
+              <div className="mt-12 flex items-center justify-center gap-3">
+                {currentPage > 1 ? (
+                  <Link href={createPageHref(currentPage - 1)}>
+                    <Button variant="outline" size="sm" className="font-semibold">
+                      Previous
+                    </Button>
+                  </Link>
+                ) : (
+                  <Button variant="outline" size="sm" disabled className="font-semibold opacity-40">
+                    Previous
+                  </Button>
+                )}
+
+                <span className="px-2 text-xs sm:text-sm font-medium text-muted-foreground">
+                  Page {currentPage} of {totalPages}
+                </span>
+
+                {currentPage < totalPages ? (
+                  <Link href={createPageHref(currentPage + 1)}>
+                    <Button variant="outline" size="sm" className="font-semibold">
+                      Next
+                    </Button>
+                  </Link>
+                ) : (
+                  <Button variant="outline" size="sm" disabled className="font-semibold opacity-40">
+                    Next
+                  </Button>
+                )}
+              </div>
+            )}
           </div>
         </section>
       </main>

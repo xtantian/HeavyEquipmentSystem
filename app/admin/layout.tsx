@@ -1,10 +1,11 @@
 import * as React from "react";
-import { currentUser } from "@clerk/nextjs/server";
+import { auth } from "@clerk/nextjs/server";
 import { redirect } from "next/navigation";
 import { Navbar } from "@/components/landing/navbar";
 import { Footer } from "@/components/landing/footer";
 import { AdminNav } from "@/components/admin/admin-nav";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { verifyAdminSession } from "@/lib/auth/admin";
 
 export const dynamic = "force-dynamic";
 
@@ -18,34 +19,14 @@ export default async function AdminLayout({
 }: {
   children: React.ReactNode;
 }) {
-  // 1. Strict Server-Side Role-Based Access Control (RBAC)
-  const user = await currentUser();
-  if (!user) {
+  // 1. Strict Server-Side Role-Based Access Control (RBAC) via fast local JWT claims & authoritative Clerk verification
+  const { userId } = await auth();
+  if (!userId) {
     redirect("/sign-in?redirect_url=/admin");
   }
 
-  let isAdmin = user.publicMetadata?.role === "admin";
-
-  if (!isAdmin) {
-    // Check Supabase profiles role as mirror fallback
-    try {
-      const supabase = await createSupabaseServerClient();
-      const { data: profile } = await supabase
-        .from("profiles")
-        .select("role")
-        .eq("clerk_user_id", user.id)
-        .maybeSingle();
-
-      if (profile?.role === "admin") {
-        isAdmin = true;
-      }
-    } catch (err) {
-      console.warn("[AdminLayout] Error verifying profile role:", err);
-    }
-  }
-
-  // Reject non-admin access immediately at server level
-  if (!isAdmin) {
+  const authResult = await verifyAdminSession();
+  if (!authResult.authorized) {
     redirect("/");
   }
 
