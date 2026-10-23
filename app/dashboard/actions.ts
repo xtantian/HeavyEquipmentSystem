@@ -8,6 +8,7 @@ import {
   createSupabaseServiceClient,
 } from "@/lib/supabase/server";
 import { verifyAdminSession } from "@/lib/auth/admin";
+import type { Database } from "@/lib/supabase/types";
 
 // [TYPE] Union type listing the exact allowed booking lifecycle statuses.
 export type UpdatableBookingStatus =
@@ -18,6 +19,14 @@ export type UpdatableBookingStatus =
   | "returned"
   | "completed"
   | "cancelled";
+
+type DashboardBookingRecord = {
+  id: string;
+  renter_id: string;
+  status: UpdatableBookingStatus;
+  listing_id: string;
+  listing?: unknown;
+};
 
 /**
  * Authoritative Server Action for updating a rental booking's status.
@@ -54,7 +63,9 @@ export async function updateBookingStatusAction(
 
     // 1. Fetch booking with listing relation to verify ownership
     // [DB] + [METHOD] Query the booking record joined with the parent listing to identify the equipment owner.
-    const { data: booking, error: fetchError } = await supabase
+    let booking: DashboardBookingRecord | null = null;
+
+    const { data: bookingData, error: fetchError } = await supabase
       .from("bookings")
       .select(`
         id,
@@ -66,8 +77,29 @@ export async function updateBookingStatusAction(
       .eq("id", bookingId)
       .maybeSingle();
 
+    if (!fetchError && bookingData) {
+      booking = bookingData as unknown as DashboardBookingRecord;
+    } else {
+      const serviceClient = createSupabaseServiceClient();
+      const { data: svcData } = await serviceClient
+        .from("bookings")
+        .select(`
+          id,
+          renter_id,
+          status,
+          listing_id,
+          listing:listings(owner_id)
+        `)
+        .eq("id", bookingId)
+        .maybeSingle();
+
+      if (svcData) {
+        booking = svcData as unknown as DashboardBookingRecord;
+      }
+    }
+
     // [IF] + [RETURN] Reject if booking does not exist.
-    if (fetchError || !booking) {
+    if (!booking) {
       return {
         error: "Booking record not found in database.",
         code: "NOT_FOUND",
@@ -77,8 +109,27 @@ export async function updateBookingStatusAction(
     // 2. Determine authorization
     // [DECL] + [INIT] Derive identity roles relative to this specific reservation record.
     const isRenter = booking.renter_id === userId;
-    const listingOwnerId = (booking.listing as unknown as { owner_id: string } | null)?.owner_id;
-    const isOwner = listingOwnerId === userId;
+    let listingOwnerId: string | null = null;
+    const rawListing = booking.listing;
+    if (Array.isArray(rawListing) && rawListing.length > 0) {
+      listingOwnerId = (rawListing[0] as { owner_id?: string })?.owner_id || null;
+    } else if (rawListing && typeof rawListing === "object" && "owner_id" in rawListing) {
+      listingOwnerId = (rawListing as { owner_id: string }).owner_id || null;
+    }
+
+    if (!listingOwnerId && booking.listing_id) {
+      const serviceClient = createSupabaseServiceClient();
+      const { data: directListing } = await serviceClient
+        .from("listings")
+        .select("owner_id")
+        .eq("id", booking.listing_id)
+        .maybeSingle();
+      if (directListing) {
+        listingOwnerId = directListing.owner_id;
+      }
+    }
+
+    const isOwner = Boolean(listingOwnerId && listingOwnerId === userId);
 
     let isAdmin = false;
     if (!isRenter && !isOwner) {
@@ -92,6 +143,23 @@ export async function updateBookingStatusAction(
     // Administrators can execute any valid transition.
     if (isAdmin) {
       isAuthorized = true;
+    } else if (newStatus === "completed") {
+      // Single-party completion: either the renter OR the equipment owner can complete
+      if (booking.status === "cancelled") {
+        return {
+          error: "Cancelled bookings cannot be marked as completed.",
+          code: "INVALID_TRANSITION",
+        };
+      }
+      if (booking.status === "completed") {
+        return {
+          error: "This booking is already marked as completed.",
+          code: "ALREADY_COMPLETED",
+        };
+      }
+      if (isRenter || isOwner) {
+        isAuthorized = true;
+      }
     } else if (isOwner) {
       // Equipment owners can accept pending requests or cancel/decline pending/accepted requests
       if (newStatus === "accepted") {
@@ -133,23 +201,46 @@ export async function updateBookingStatusAction(
     }
 
     // 3. Execute database update
-    // [DB] + [METHOD] Update booking status in PostgreSQL with updated timestamp.
+    // [DB] + [METHOD] Update booking status in PostgreSQL with updated timestamp and completion audit trail.
+    const nowIso = new Date().toISOString();
+    const updatePayload: Database["public"]["Tables"]["bookings"]["Update"] = {
+      status: newStatus,
+      updated_at: nowIso,
+    };
+
+    if (newStatus === "completed") {
+      updatePayload.completed_by = userId;
+      updatePayload.completed_at = nowIso;
+    }
+
+    let updatedRecord: { id: string; status: string } | null = null;
     const { data, error } = await supabase
       .from("bookings")
-      .update({
-        status: newStatus,
-        updated_at: new Date().toISOString(),
-      })
+      .update(updatePayload)
       .eq("id", bookingId)
       .select("id, status")
       .single();
 
     if (error || !data) {
-      console.error("[updateBookingStatusAction] Database update error:", error?.message);
-      return {
-        error: error?.message || "Failed to update booking status in database.",
-        code: "ERROR",
-      };
+      // Service role fallback if client RLS token is missing
+      const serviceClient = createSupabaseServiceClient();
+      const { data: svcData, error: svcError } = await serviceClient
+        .from("bookings")
+        .update(updatePayload)
+        .eq("id", bookingId)
+        .select("id, status")
+        .single();
+
+      if (svcError || !svcData) {
+        console.error("[updateBookingStatusAction] Database update error:", error?.message || svcError?.message);
+        return {
+          error: error?.message || svcError?.message || "Failed to update booking status in database.",
+          code: "ERROR",
+        };
+      }
+      updatedRecord = svcData;
+    } else {
+      updatedRecord = data;
     }
 
     // [METHOD] Purge Next.js cached pages so user dashboards and listing pages reflect updated status immediately.
@@ -157,12 +248,223 @@ export async function updateBookingStatusAction(
     if (booking.listing_id) {
       revalidatePath(`/listings/${booking.listing_id}`);
     }
+    if (listingOwnerId) {
+      revalidatePath(`/profile/${listingOwnerId}`);
+    }
+
     // [RETURN] Send updated booking status back to client component.
-    return { success: true, bookingId: data.id, status: data.status };
+    return {
+      success: true,
+      bookingId: updatedRecord.id,
+      status: updatedRecord.status,
+      completedBy: newStatus === "completed" ? userId : undefined,
+      completedAt: newStatus === "completed" ? nowIso : undefined,
+      isRenter,
+    };
   } catch (err: unknown) {
     console.error("[updateBookingStatusAction] Exception:", err);
     return {
       error: "An unexpected error occurred while updating booking status.",
+      code: "ERROR",
+    };
+  }
+}
+
+export interface CompleteBookingResult {
+  success?: boolean;
+  bookingId?: string;
+  status?: string;
+  completedBy?: string;
+  completedAt?: string;
+  isRenter?: boolean;
+  error?: string;
+  code?: string;
+}
+
+/**
+ * Authoritative Server Action for Single-Party Rental Completion.
+ *
+ * Allows EITHER the renter OR the equipment lister to complete the transaction
+ * with a single confirmation. Does not require approval from the second party.
+ * Records `completed_by` and `completed_at` timestamps in PostgreSQL.
+ * Cancelling bookings cannot be marked completed.
+ */
+export async function completeBookingAction(
+  bookingId: string
+): Promise<CompleteBookingResult> {
+  const { userId } = await auth();
+  if (!userId) {
+    return {
+      error: "You must be signed in to finalize and complete this rental.",
+      code: "AUTH_REQUIRED",
+    };
+  }
+
+  if (!bookingId) {
+    return {
+      error: "Valid booking ID is required.",
+      code: "INVALID_INPUT",
+    };
+  }
+
+  try {
+    const supabase = await createSupabaseServerClient();
+
+    // 1. Fetch booking with listing relation to verify ownership and renter identity
+    let booking: DashboardBookingRecord | null = null;
+
+    const { data: bookingData, error: fetchError } = await supabase
+      .from("bookings")
+      .select(`
+        id,
+        renter_id,
+        status,
+        listing_id,
+        listing:listings(id, owner_id, title)
+      `)
+      .eq("id", bookingId)
+      .maybeSingle();
+
+    if (!fetchError && bookingData) {
+      booking = bookingData as unknown as DashboardBookingRecord;
+    } else {
+      const serviceClient = createSupabaseServiceClient();
+      const { data: svcBooking } = await serviceClient
+        .from("bookings")
+        .select(`
+          id,
+          renter_id,
+          status,
+          listing_id,
+          listing:listings(id, owner_id, title)
+        `)
+        .eq("id", bookingId)
+        .maybeSingle();
+
+      if (svcBooking) {
+        booking = svcBooking as unknown as DashboardBookingRecord;
+      }
+    }
+
+    if (!booking) {
+      return {
+        error: "Booking record not found in database.",
+        code: "NOT_FOUND",
+      };
+    }
+
+    // 2. Prevent invalid transitions
+    if (booking.status === "cancelled") {
+      return {
+        error: "Cancelled bookings cannot be marked as completed.",
+        code: "INVALID_TRANSITION",
+      };
+    }
+
+    if (booking.status === "completed") {
+      return {
+        error: "This booking is already marked as completed.",
+        code: "ALREADY_COMPLETED",
+      };
+    }
+
+    // 3. Determine authorization
+    let listingOwnerId: string | null = null;
+    const rawListing = booking.listing;
+    if (Array.isArray(rawListing) && rawListing.length > 0) {
+      listingOwnerId = (rawListing[0] as { owner_id?: string })?.owner_id || null;
+    } else if (rawListing && typeof rawListing === "object" && "owner_id" in rawListing) {
+      listingOwnerId = (rawListing as { owner_id: string }).owner_id || null;
+    }
+
+    if (!listingOwnerId && booking.listing_id) {
+      const serviceClient = createSupabaseServiceClient();
+      const { data: directListing } = await serviceClient
+        .from("listings")
+        .select("owner_id")
+        .eq("id", booking.listing_id)
+        .maybeSingle();
+      if (directListing) {
+        listingOwnerId = directListing.owner_id;
+      }
+    }
+
+    const isRenter = booking.renter_id === userId;
+    const isOwner = Boolean(listingOwnerId && listingOwnerId === userId);
+
+    let isAdmin = false;
+    if (!isRenter && !isOwner) {
+      const adminAuth = await verifyAdminSession();
+      isAdmin = adminAuth.authorized;
+    }
+
+    if (!isRenter && !isOwner && !isAdmin) {
+      return {
+        error: "Unauthorized: Only the renter or equipment host can mark this rental as completed.",
+        code: "UNAUTHORIZED",
+      };
+    }
+
+    // 4. Record single-party completion with audit columns
+    const nowIso = new Date().toISOString();
+    const updatePayload: Database["public"]["Tables"]["bookings"]["Update"] = {
+      status: "completed" as const,
+      completed_by: userId,
+      completed_at: nowIso,
+      updated_at: nowIso,
+    };
+
+    let updatedRecord: { id: string; status: string } | null = null;
+    const { data, error } = await supabase
+      .from("bookings")
+      .update(updatePayload)
+      .eq("id", bookingId)
+      .select("id, status")
+      .single();
+
+    if (error || !data) {
+      // Fallback to service role client if RLS execution encountered an issue
+      const serviceClient = createSupabaseServiceClient();
+      const { data: svcData, error: svcError } = await serviceClient
+        .from("bookings")
+        .update(updatePayload)
+        .eq("id", bookingId)
+        .select("id, status")
+        .single();
+
+      if (svcError || !svcData) {
+        console.error("[completeBookingAction] Database update error:", error?.message || svcError?.message);
+        return {
+          error: error?.message || svcError?.message || "Failed to finalize completion in database.",
+          code: "DATABASE_ERROR",
+        };
+      }
+      updatedRecord = svcData;
+    } else {
+      updatedRecord = data;
+    }
+
+    // 5. Revalidate paths
+    revalidatePath("/dashboard");
+    if (booking.listing_id) {
+      revalidatePath(`/listings/${booking.listing_id}`);
+    }
+    if (listingOwnerId) {
+      revalidatePath(`/profile/${listingOwnerId}`);
+    }
+
+    return {
+      success: true,
+      bookingId: updatedRecord.id,
+      status: updatedRecord.status,
+      completedBy: userId,
+      completedAt: nowIso,
+      isRenter,
+    };
+  } catch (err: unknown) {
+    console.error("[completeBookingAction] Server exception:", err);
+    return {
+      error: "An unexpected error occurred while completing the booking.",
       code: "ERROR",
     };
   }

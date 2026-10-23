@@ -26,6 +26,10 @@ export interface GetConversationResult {
   messages?: BookingMessage[];
   otherParticipantId?: string;
   otherParticipantName?: string;
+  bookingStatus?: string;
+  isRenter?: boolean;
+  isOwner?: boolean;
+  hasReviewed?: boolean;
   error?: string;
   code?: string;
 }
@@ -117,7 +121,29 @@ export async function getBookingConversationAction(
       }
     }
 
-    // 3. Fetch messages in chronological order
+    // 3. Fetch booking status and review state
+    const { data: bookingData } = await supabase
+      .from("bookings")
+      .select("status")
+      .eq("id", bookingId)
+      .maybeSingle();
+
+    const bookingStatus = bookingData?.status || "accepted";
+    const isRenter = conversation.renter_id === userId;
+    const isOwner = conversation.owner_id === userId;
+
+    let hasReviewed = false;
+    if (isRenter && (bookingStatus === "completed" || bookingStatus === "returned")) {
+      const { data: rev } = await supabase
+        .from("lister_reviews")
+        .select("id")
+        .eq("booking_id", bookingId)
+        .eq("reviewer_id", userId)
+        .maybeSingle();
+      if (rev) hasReviewed = true;
+    }
+
+    // 4. Fetch messages in chronological order
     const { data: messagesData, error: messagesError } = await supabase
       .from("messages")
       .select("id, conversation_id, sender_id, content, read_at, created_at")
@@ -132,6 +158,10 @@ export async function getBookingConversationAction(
         messages: [],
         otherParticipantId,
         otherParticipantName,
+        bookingStatus,
+        isRenter,
+        isOwner,
+        hasReviewed,
       };
     }
 
@@ -141,6 +171,10 @@ export async function getBookingConversationAction(
       messages: (messagesData || []) as BookingMessage[],
       otherParticipantId,
       otherParticipantName,
+      bookingStatus,
+      isRenter,
+      isOwner,
+      hasReviewed,
     };
   } catch (err: unknown) {
     console.error("[getBookingConversationAction] Unexpected exception:", err);

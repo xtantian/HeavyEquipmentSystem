@@ -489,6 +489,8 @@ export interface Database {
           fulfillment_method: string;
           delivery_address?: string | null;
           fulfillment_notes?: string | null;
+          completed_by?: string | null;
+          completed_at?: string | null;
           created_at: string;
           updated_at: string;
         };
@@ -503,6 +505,8 @@ export interface Database {
           fulfillment_method?: string;
           delivery_address?: string | null;
           fulfillment_notes?: string | null;
+          completed_by?: string | null;
+          completed_at?: string | null;
           created_at?: string;
           updated_at?: string;
         };
@@ -517,6 +521,8 @@ export interface Database {
           fulfillment_method?: string;
           delivery_address?: string | null;
           fulfillment_notes?: string | null;
+          completed_by?: string | null;
+          completed_at?: string | null;
           created_at?: string;
           updated_at?: string;
         };

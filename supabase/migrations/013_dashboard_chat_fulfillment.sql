@@ -177,6 +177,7 @@ DROP POLICY IF EXISTS "profiles_update_own" ON public.profiles;
 DROP POLICY IF EXISTS "Profiles update policy" ON public.profiles;
 DROP POLICY IF EXISTS "Admins can update all profiles" ON public.profiles;
 DROP POLICY IF EXISTS "Allow update profiles" ON public.profiles;
+DROP POLICY IF EXISTS "profiles_update_policy" ON public.profiles;
 
 CREATE POLICY "profiles_update_policy"
   ON public.profiles
@@ -192,6 +193,7 @@ CREATE POLICY "profiles_update_policy"
 
 DROP POLICY IF EXISTS "profiles_insert_own" ON public.profiles;
 DROP POLICY IF EXISTS "Profiles insert policy" ON public.profiles;
+DROP POLICY IF EXISTS "profiles_insert_policy" ON public.profiles;
 
 CREATE POLICY "profiles_insert_policy"
   ON public.profiles

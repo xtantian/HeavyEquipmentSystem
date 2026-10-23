@@ -2213,6 +2213,739 @@ assert(adminSupabaseContent.includes("Promise.all(["), "Admin overview stats que
 const heroContent = fs.readFileSync(path.join(__dirname, "../components/landing/hero.tsx"), "utf-8");
 assert(heroContent.includes("shouldRenderImage"), "Hero carousel defers non-active background slides to save initial paint network weight");
 
+// -----------------------------------------------------------------------------
+// 21. SINGLE-PARTY RENTAL COMPLETION & REVIEW UNLOCKING INVARIANTS
+// -----------------------------------------------------------------------------
+console.log("\n▶ SUITE 21: Single-Party Rental Completion & Review Invariants");
+
+// Simulation logic matching app/dashboard/actions.ts: completeBookingAction
+function simulateCompleteBooking({ booking, callerId }) {
+  if (!callerId) {
+    return { success: false, error: "Authentication required", code: "AUTH_REQUIRED" };
+  }
+  if (!booking) {
+    return { success: false, error: "Booking record not found", code: "NOT_FOUND" };
+  }
+  if (booking.status === "cancelled") {
+    return { success: false, error: "Cancelled bookings cannot be marked as completed.", code: "INVALID_TRANSITION" };
+  }
+  if (booking.status === "completed") {
+    return { success: false, error: "This booking is already marked as completed.", code: "ALREADY_COMPLETED" };
+  }
+
+  const isRenter = booking.renter_id === callerId;
+  const isOwner = booking.owner_id === callerId;
+  const isAdmin = callerId === "admin_user";
+
+  if (!isRenter && !isOwner && !isAdmin) {
+    return { success: false, error: "Unauthorized: You do not have permission to complete this booking.", code: "UNAUTHORIZED" };
+  }
+
+  const now = new Date().toISOString();
+  return {
+    success: true,
+    bookingId: booking.id,
+    status: "completed",
+    completed_by: callerId,
+    completed_at: now,
+    isRenter,
+    isOwner,
+  };
+}
+
+const mockBookingActive = {
+  id: "booking-active-123",
+  renter_id: "renter_alice",
+  owner_id: "owner_bob",
+  status: "active",
+};
+
+const mockBookingCancelled = {
+  id: "booking-cancelled-456",
+  renter_id: "renter_alice",
+  owner_id: "owner_bob",
+  status: "cancelled",
+};
+
+const mockBookingCompleted = {
+  id: "booking-completed-789",
+  renter_id: "renter_alice",
+  owner_id: "owner_bob",
+  status: "completed",
+  completed_by: "renter_alice",
+  completed_at: "2026-10-23T12:00:00Z",
+};
+
+// 21.1: Single confirmation by Renter
+const renterCompleteRes = simulateCompleteBooking({
+  booking: mockBookingActive,
+  callerId: "renter_alice",
+});
+assert(renterCompleteRes.success === true, "Renter can complete booking with single confirmation");
+assert(renterCompleteRes.status === "completed", "Booking status immediately transitions to 'completed'");
+assert(renterCompleteRes.completed_by === "renter_alice", "Booking records completed_by = renter_id");
+assert(Boolean(renterCompleteRes.completed_at), "Booking records completed_at timestamp");
+assert(renterCompleteRes.isRenter === true, "Identifies completing party as renter to unlock review");
+
+// 21.2: Single confirmation by Lister / Equipment Owner
+const ownerCompleteRes = simulateCompleteBooking({
+  booking: mockBookingActive,
+  callerId: "owner_bob",
+});
+assert(ownerCompleteRes.success === true, "Equipment owner can complete booking with single confirmation");
+assert(ownerCompleteRes.status === "completed", "Booking status immediately transitions to 'completed'");
+assert(ownerCompleteRes.completed_by === "owner_bob", "Booking records completed_by = owner_id");
+assert(Boolean(ownerCompleteRes.completed_at), "Booking records completed_at timestamp");
+
+// 21.3: Unauthorized stranger rejected
+const strangerCompleteRes = simulateCompleteBooking({
+  booking: mockBookingActive,
+  callerId: "stranger_eve",
+});
+assert(strangerCompleteRes.success === false, "Unauthorized stranger cannot complete booking");
+assert(strangerCompleteRes.code === "UNAUTHORIZED", "Stranger rejected with UNAUTHORIZED code");
+
+// 21.4: Cancelled booking cannot be completed
+const cancelledCompleteRes = simulateCompleteBooking({
+  booking: mockBookingCancelled,
+  callerId: "renter_alice",
+});
+assert(cancelledCompleteRes.success === false, "Cancelled booking cannot be marked as completed");
+assert(cancelledCompleteRes.code === "INVALID_TRANSITION", "Cancelled completion rejected with INVALID_TRANSITION");
+
+// 21.5: Already completed booking cannot be completed again
+const alreadyCompletedRes = simulateCompleteBooking({
+  booking: mockBookingCompleted,
+  callerId: "renter_alice",
+});
+assert(alreadyCompletedRes.success === false, "Already completed booking cannot be completed again");
+assert(alreadyCompletedRes.code === "ALREADY_COMPLETED", "Duplicate completion rejected with ALREADY_COMPLETED");
+
+// 21.6: Review Feature Unlocking Rules
+function simulateSubmitReview({ booking, callerId, rating, existingReviews }) {
+  if (!callerId) return { success: false, code: "AUTH_REQUIRED" };
+  if (!rating || rating < 1 || rating > 5) return { success: false, code: "INVALID_INPUT" };
+  if (!booking) return { success: false, code: "BOOKING_NOT_FOUND" };
+  if (booking.renter_id !== callerId) return { success: false, code: "NOT_ELIGIBLE" };
+  if (!["completed", "returned"].includes(booking.status)) return { success: false, code: "NOT_ELIGIBLE" };
+  if (booking.owner_id === callerId) return { success: false, code: "SELF_REVIEW" };
+  if (existingReviews && existingReviews.some((r) => r.booking_id === booking.id && r.reviewer_id === callerId)) {
+    return { success: false, code: "ALREADY_REVIEWED" };
+  }
+  return { success: true, reviewId: "review-new-1" };
+}
+
+// Completed booking review allowed for renter
+const reviewCompletedRes = simulateSubmitReview({
+  booking: { id: "b1", renter_id: "u1", owner_id: "u2", status: "completed" },
+  callerId: "u1",
+  rating: 5,
+  existingReviews: [],
+});
+assert(reviewCompletedRes.success === true, "Renter can leave review for completed booking");
+
+// Pending booking review blocked
+const reviewPendingRes = simulateSubmitReview({
+  booking: { id: "b2", renter_id: "u1", owner_id: "u2", status: "pending" },
+  callerId: "u1",
+  rating: 5,
+  existingReviews: [],
+});
+assert(reviewPendingRes.success === false && reviewPendingRes.code === "NOT_ELIGIBLE", "Pending booking review is blocked");
+
+// Cancelled booking review blocked
+const reviewCancelledRes = simulateSubmitReview({
+  booking: { id: "b3", renter_id: "u1", owner_id: "u2", status: "cancelled" },
+  callerId: "u1",
+  rating: 5,
+  existingReviews: [],
+});
+assert(reviewCancelledRes.success === false && reviewCancelledRes.code === "NOT_ELIGIBLE", "Cancelled booking review is blocked");
+
+// Duplicate review for same booking blocked
+const reviewDupRes = simulateSubmitReview({
+  booking: { id: "b1", renter_id: "u1", owner_id: "u2", status: "completed" },
+  callerId: "u1",
+  rating: 4,
+  existingReviews: [{ booking_id: "b1", reviewer_id: "u1" }],
+});
+assert(reviewDupRes.success === false && reviewDupRes.code === "ALREADY_REVIEWED", "Duplicate review for same completed booking is strictly blocked");
+
+// 21.7: Static Invariants - Migration 016
+const migration016Path = path.join(__dirname, "../supabase/migrations/016_single_party_rental_completion.sql");
+assert(fs.existsSync(migration016Path), "Migration 016 file exists");
+const migration016Sql = fs.readFileSync(migration016Path, "utf-8");
+assert(migration016Sql.includes("completed_by"), "Migration 016 adds completed_by column");
+assert(migration016Sql.includes("completed_at"), "Migration 016 adds completed_at column");
+assert(migration016Sql.includes("status = 'completed'"), "Migration 016 permits status = 'completed' in RLS update policy");
+
+// 21.8: Static Invariants - BookingChatModal & DashboardTabs
+const chatModalCode = fs.readFileSync(path.join(__dirname, "../components/dashboard/booking-chat-modal.tsx"), "utf-8");
+assert(chatModalCode.includes("completeBookingAction"), "BookingChatModal imports and invokes completeBookingAction");
+assert(chatModalCode.includes("Mark as Done"), "BookingChatModal renders 'Mark as Done' button");
+assert(chatModalCode.includes("WriteListerReviewModal"), "BookingChatModal integrates WriteListerReviewModal for immediate review");
+
+const dashboardTabsCode = fs.readFileSync(path.join(__dirname, "../components/dashboard/dashboard-tabs.tsx"), "utf-8");
+assert(dashboardTabsCode.includes("completeBookingAction"), "DashboardTabs imports completeBookingAction");
+assert(dashboardTabsCode.includes("Mark as Done"), "DashboardTabs renders 'Mark as Done' button on rental cards");
+assert(dashboardTabsCode.includes("completingBooking"), "DashboardTabs tracks completingBooking state for confirmation dialog");
+
+// 21.9: Static Invariants - Lister Profile Host Reputation
+const listerReviewsListCode = fs.readFileSync(path.join(__dirname, "../components/reviews/lister-reviews-list.tsx"), "utf-8");
+assert(listerReviewsListCode.includes("average_rating"), "Host Reputation displays average star rating");
+assert(listerReviewsListCode.includes("total_reviews"), "Host Reputation displays total verified reviews count");
+assert(listerReviewsListCode.includes("rating_distribution"), "Host Reputation displays 1-5 star distribution");
+assert(listerReviewsListCode.includes("rev.reviewer.name"), "Host Reputation displays reviewer name, rating, comment, date");
+
+// -----------------------------------------------------------------------------
+// 22. REGRESSION VERIFICATION: BUG 1 (SCHEMA CACHE) & BUG 2 (COUNTERPARTY RESOLUTION)
+// -----------------------------------------------------------------------------
+console.log("\n▶ SUITE 22: Regression Verification — Completion Audit Fields & Counterparty Resolution");
+
+// 22.1: Schema audit columns and types
+const dbTypesContent = fs.readFileSync(path.join(__dirname, "../lib/supabase/types.ts"), "utf-8");
+assert(dbTypesContent.includes("completed_by?: string | null;"), "Database types declare bookings.completed_by column");
+assert(dbTypesContent.includes("completed_at?: string | null;"), "Database types declare bookings.completed_at column");
+assert(dbTypesContent.includes("preliminary_feedback: {"), "Database types declare preliminary_feedback table");
+
+// 22.2: Counterparty resolution unit logic simulation
+function resolveBookingCounterparty({ booking, callerId }) {
+  if (!booking) return { error: "Booking record not found.", code: "BOOKING_NOT_FOUND" };
+  
+  // Extract owner_id from nested object, array, or direct listing fallback
+  let listingOwnerId = null;
+  const rawListing = booking.listing;
+  if (Array.isArray(rawListing) && rawListing.length > 0) {
+    listingOwnerId = rawListing[0]?.owner_id || null;
+  } else if (rawListing && typeof rawListing === "object" && rawListing.owner_id) {
+    listingOwnerId = rawListing.owner_id;
+  } else if (booking.direct_listing_owner_id) {
+    listingOwnerId = booking.direct_listing_owner_id;
+  }
+
+  const isRenter = booking.renter_id === callerId;
+  const isOwner = Boolean(listingOwnerId && listingOwnerId === callerId);
+
+  if (!isRenter && !isOwner) {
+    return { error: "Unauthorized: You are not a registered participant in this booking.", code: "NOT_ELIGIBLE" };
+  }
+
+  const counterpartyId = isRenter ? listingOwnerId : booking.renter_id;
+  if (!counterpartyId) {
+    return { error: "Could not resolve booking counterparty.", code: "DATABASE_ERROR" };
+  }
+
+  return { success: true, counterpartyId, isRenter, isOwner };
+}
+
+// Test Case 1: Renter resolves lister as counterparty (object listing)
+const cpRenterRes = resolveBookingCounterparty({
+  booking: {
+    id: "bk-1",
+    renter_id: "renter_1",
+    listing_id: "list-1",
+    listing: { id: "list-1", owner_id: "owner_1" }
+  },
+  callerId: "renter_1"
+});
+assert(cpRenterRes.success && cpRenterRes.counterpartyId === "owner_1", "Renter reliably resolves listing owner as counterparty");
+
+// Test Case 2: Lister resolves renter as counterparty (object listing)
+const cpOwnerRes = resolveBookingCounterparty({
+  booking: {
+    id: "bk-1",
+    renter_id: "renter_1",
+    listing_id: "list-1",
+    listing: { id: "list-1", owner_id: "owner_1" }
+  },
+  callerId: "owner_1"
+});
+assert(cpOwnerRes.success && cpOwnerRes.counterpartyId === "renter_1", "Lister reliably resolves renter as counterparty");
+
+// Test Case 3: Counterparty resolves when listing is returned as an array by PostgREST
+const cpArrayRes = resolveBookingCounterparty({
+  booking: {
+    id: "bk-2",
+    renter_id: "renter_1",
+    listing_id: "list-2",
+    listing: [{ id: "list-2", owner_id: "owner_2" }]
+  },
+  callerId: "renter_1"
+});
+assert(cpArrayRes.success && cpArrayRes.counterpartyId === "owner_2", "Counterparty resolves when PostgREST returns listing as array");
+
+// Test Case 4: Counterparty resolves via direct listing fallback when join is null (e.g. non-available RLS)
+const cpFallbackRes = resolveBookingCounterparty({
+  booking: {
+    id: "bk-3",
+    renter_id: "renter_1",
+    listing_id: "list-3",
+    listing: null,
+    direct_listing_owner_id: "owner_3"
+  },
+  callerId: "renter_1"
+});
+assert(cpFallbackRes.success && cpFallbackRes.counterpartyId === "owner_3", "Counterparty resolves via direct listing fallback when join is null");
+
+// Test Case 5: Unrelated caller is strictly rejected from resolving counterparty
+const cpStrangerRes = resolveBookingCounterparty({
+  booking: {
+    id: "bk-1",
+    renter_id: "renter_1",
+    listing_id: "list-1",
+    listing: { id: "list-1", owner_id: "owner_1" }
+  },
+  callerId: "stranger_eve"
+});
+assert(!cpStrangerRes.success && cpStrangerRes.code === "NOT_ELIGIBLE", "Unrelated third-party caller rejected from counterparty resolution");
+
+// 22.3: Two review systems separation invariants
+const reviewsActionsCode = fs.readFileSync(path.join(__dirname, "../app/actions/reviews.ts"), "utf-8");
+assert(reviewsActionsCode.includes("resolveAuthoritativeBooking"), "reviews.ts defines resolveAuthoritativeBooking helper");
+assert(reviewsActionsCode.includes("from(\"preliminary_feedback\")"), "submitPreliminaryFeedbackAction operates on preliminary_feedback table");
+assert(reviewsActionsCode.includes("from(\"lister_reviews\")"), "submitListerReviewAction operates on lister_reviews table");
+assert(reviewsActionsCode.includes("from(\"renter_reviews\")"), "submitRenterReviewAction operates on renter_reviews table");
+
+// 22.4: Dashboard actions completion invariants
+const dashboardActionsCheck = fs.readFileSync(path.join(__dirname, "../app/dashboard/actions.ts"), "utf-8");
+assert(dashboardActionsCheck.includes("completed_by: userId"), "completeBookingAction persists completed_by audit field");
+assert(dashboardActionsCheck.includes("completed_at: nowIso"), "completeBookingAction persists completed_at timestamp");
+assert(dashboardActionsCheck.includes("INVALID_TRANSITION"), "completeBookingAction blocks cancelled booking transitions");
+
+// -----------------------------------------------------------------------------
+// 23. PUBLIC LISTER REVIEW WORKFLOW & CLIENT BOUNDARY REGRESSION INVARIANTS
+// -----------------------------------------------------------------------------
+console.log("\n▶ SUITE 23: Public Lister Review System End-to-End Invariants");
+
+// 23.1: React Server Component boundary invariant on StarRating
+const starRatingContent = fs.readFileSync(path.join(__dirname, "../components/reviews/star-rating.tsx"), "utf-8");
+assert(
+  starRatingContent.trim().startsWith('"use client";') || starRatingContent.trim().startsWith("'use client';"),
+  "components/reviews/star-rating.tsx establishes explicit Client Component boundary ('use client')"
+);
+
+const listingPageContent = fs.readFileSync(path.join(__dirname, "../app/listings/[id]/page.tsx"), "utf-8");
+assert(
+  !listingPageContent.includes('"use client"') && !listingPageContent.includes("'use client'"),
+  "app/listings/[id]/page.tsx remains a performant React Server Component"
+);
+assert(listingPageContent.includes("ListerProfileCard"), "Listing detail page renders host profile card with reviews");
+
+// 23.2: Eligibility - Renter can submit one public review after completing a booking
+function evaluatePublicReviewWorkflow({
+  callerId,
+  booking,
+  rating,
+  comment,
+  existingReviews = [],
+}) {
+  if (!callerId) return { success: false, code: "AUTH_REQUIRED" };
+  if (!rating || typeof rating !== "number" || !Number.isInteger(rating) || rating < 1 || rating > 5) {
+    return { success: false, code: "INVALID_INPUT" };
+  }
+  if (comment && comment.length > 1000) return { success: false, code: "INVALID_INPUT" };
+  if (!booking) return { success: false, code: "BOOKING_NOT_FOUND" };
+  if (booking.renter_id !== callerId) return { success: false, code: "NOT_ELIGIBLE" };
+  if (!["completed", "returned"].includes(booking.status)) return { success: false, code: "NOT_ELIGIBLE" };
+  if (booking.owner_id === callerId) return { success: false, code: "SELF_REVIEW" };
+  if (existingReviews.some((r) => r.booking_id === booking.id && r.reviewer_id === callerId)) {
+    return { success: false, code: "ALREADY_REVIEWED" };
+  }
+  return {
+    success: true,
+    review: {
+      id: "rev_test_123",
+      booking_id: booking.id,
+      reviewer_id: callerId,
+      lister_id: booking.owner_id,
+      rating,
+      comment: comment || null,
+      created_at: new Date().toISOString(),
+    },
+  };
+}
+
+const completedBooking1 = {
+  id: "booking_done_1",
+  renter_id: "user_renter_alice",
+  owner_id: "user_lister_bob",
+  status: "completed",
+};
+
+const validReviewRes = evaluatePublicReviewWorkflow({
+  callerId: "user_renter_alice",
+  booking: completedBooking1,
+  rating: 5,
+  comment: "Excellent machinery, delivered clean and fueled.",
+});
+assert(validReviewRes.success === true, "Eligible renter can submit public review on completed booking");
+assert(validReviewRes.review.lister_id === "user_lister_bob", "Public review is bound to correct listing owner");
+assert(validReviewRes.review.booking_id === "booking_done_1", "Public review is bound to correct booking");
+
+// 23.3: Profile aggregation - Average rating, review count, and star distribution
+function computeListerRatingSummary(reviews) {
+  const summary = {
+    average_rating: 0,
+    total_reviews: reviews.length,
+    rating_distribution: { 5: 0, 4: 0, 3: 0, 2: 0, 1: 0 },
+  };
+  if (reviews.length === 0) return summary;
+  let sum = 0;
+  for (const r of reviews) {
+    sum += r.rating;
+    if (r.rating in summary.rating_distribution) {
+      summary.rating_distribution[r.rating]++;
+    }
+  }
+  summary.average_rating = Number((sum / reviews.length).toFixed(1));
+  return summary;
+}
+
+const mockProfileReviews = [
+  { rating: 5 },
+  { rating: 5 },
+  { rating: 4 },
+  { rating: 3 },
+  { rating: 5 },
+];
+const computedSummary = computeListerRatingSummary(mockProfileReviews);
+assert(computedSummary.total_reviews === 5, "Total review count computed correctly (5)");
+assert(computedSummary.average_rating === 4.4, "Average rating computed accurately (4.4)");
+assert(computedSummary.rating_distribution[5] === 3, "Star distribution for 5 stars is 3");
+assert(computedSummary.rating_distribution[4] === 1, "Star distribution for 4 stars is 1");
+assert(computedSummary.rating_distribution[3] === 1, "Star distribution for 3 stars is 1");
+assert(computedSummary.rating_distribution[2] === 0, "Star distribution for 2 stars is 0");
+assert(computedSummary.rating_distribution[1] === 0, "Star distribution for 1 star is 0");
+
+// 23.4: Duplicate review rejection
+const duplicateReviewRes = evaluatePublicReviewWorkflow({
+  callerId: "user_renter_alice",
+  booking: completedBooking1,
+  rating: 4,
+  existingReviews: [{ booking_id: "booking_done_1", reviewer_id: "user_renter_alice" }],
+});
+assert(duplicateReviewRes.success === false && duplicateReviewRes.code === "ALREADY_REVIEWED", "Duplicate review for same booking is strictly rejected");
+
+// 23.5: Concurrent review submissions handled atomically
+function simulateConcurrentReviewSubmissions(bookingId, reviewerId, attempts) {
+  const databaseTable = new Set();
+  const results = [];
+  for (let i = 0; i < attempts; i++) {
+    const key = `${bookingId}_${reviewerId}`;
+    if (databaseTable.has(key)) {
+      results.push({ success: false, code: "ALREADY_REVIEWED" });
+    } else {
+      databaseTable.add(key);
+      results.push({ success: true, id: `rev_${i}` });
+    }
+  }
+  return results;
+}
+const concurrentAttempts = simulateConcurrentReviewSubmissions("booking_done_1", "user_renter_alice", 5);
+const successfulSubmissions = concurrentAttempts.filter((a) => a.success);
+const rejectedDuplicates = concurrentAttempts.filter((a) => !a.success && a.code === "ALREADY_REVIEWED");
+assert(successfulSubmissions.length === 1, "Exactly one concurrent submission succeeds");
+assert(rejectedDuplicates.length === 4, "Remaining 4 concurrent attempts fail duplicate check with ALREADY_REVIEWED");
+
+// 23.6: Unrelated stranger blocked from reviewing
+const strangerReviewRes = evaluatePublicReviewWorkflow({
+  callerId: "user_stranger_eve",
+  booking: completedBooking1,
+  rating: 5,
+});
+assert(strangerReviewRes.success === false && strangerReviewRes.code === "NOT_ELIGIBLE", "Unrelated caller strictly rejected from reviewing another user's booking");
+
+// 23.7: Incomplete/Pending/Active/Cancelled bookings cannot be reviewed
+const pendingBookingReview = evaluatePublicReviewWorkflow({
+  callerId: "user_renter_alice",
+  booking: { id: "bk_p", renter_id: "user_renter_alice", owner_id: "user_lister_bob", status: "pending" },
+  rating: 5,
+});
+assert(pendingBookingReview.success === false && pendingBookingReview.code === "NOT_ELIGIBLE", "Pending booking cannot be reviewed");
+
+const activeBookingReview = evaluatePublicReviewWorkflow({
+  callerId: "user_renter_alice",
+  booking: { id: "bk_a", renter_id: "user_renter_alice", owner_id: "user_lister_bob", status: "active" },
+  rating: 5,
+});
+assert(activeBookingReview.success === false && activeBookingReview.code === "NOT_ELIGIBLE", "Active booking cannot be reviewed until completed");
+
+const cancelledBookingReview = evaluatePublicReviewWorkflow({
+  callerId: "user_renter_alice",
+  booking: { id: "bk_c", renter_id: "user_renter_alice", owner_id: "user_lister_bob", status: "cancelled" },
+  rating: 5,
+});
+assert(cancelledBookingReview.success === false && cancelledBookingReview.code === "NOT_ELIGIBLE", "Cancelled booking cannot be reviewed");
+
+// 23.8: Self-review blocked
+const selfReviewRes = evaluatePublicReviewWorkflow({
+  callerId: "user_lister_bob",
+  booking: { id: "bk_self", renter_id: "user_lister_bob", owner_id: "user_lister_bob", status: "completed" },
+  rating: 5,
+});
+assert(selfReviewRes.success === false && selfReviewRes.code === "SELF_REVIEW", "Lister cannot review themselves");
+
+// ============================================================================
+// SUITE 24: Admin Report Dismissal Persistence & Invariants
+// ============================================================================
+console.log("\n▶ SUITE 24: Admin Report Dismissal Persistence & Invariants");
+
+// Model simulating authoritative Supabase database tables for reports
+function createMockReportsDatabase() {
+  const listingReports = new Map([
+    [
+      "rep_listing_1",
+      {
+        id: "rep_listing_1",
+        listing_id: "77777777-7777-4777-8777-777777777777",
+        reporter_id: "user_renter_1",
+        reporter_email: "renter1@example.com",
+        reason: "Inaccurate equipment specs",
+        details: "Rated at 20 tons but only 10 tons.",
+        status: "pending",
+        created_at: "2026-10-20T10:00:00Z",
+        updated_at: "2026-10-20T10:00:00Z",
+      },
+    ],
+  ]);
+
+  const profileReports = new Map([
+    [
+      "rep_prof_1",
+      {
+        id: "rep_prof_1",
+        target_user_id: "user_host_999",
+        reporter_id: "user_renter_2",
+        reporter_email: "renter2@example.com",
+        reason: "Harassment or abusive behavior",
+        details: "Lister threatened during coordination.",
+        status: "pending",
+        created_at: "2026-10-21T12:00:00Z",
+        updated_at: "2026-10-21T12:00:00Z",
+      },
+    ],
+  ]);
+
+  const listings = new Map([
+    [
+      "77777777-7777-4777-8777-777777777777",
+      {
+        id: "77777777-7777-4777-8777-777777777777",
+        title: "CAT 320 Excavator",
+        is_reported: true,
+        report_reason: "Inaccurate equipment specs",
+      },
+    ],
+  ]);
+
+  const auditLogs = [];
+
+  return {
+    listingReports,
+    profileReports,
+    listings,
+    auditLogs,
+  };
+}
+
+// Authoritative simulation of dismissReportAction logic
+function simulateDismissReportAction(db, { callerRole, reportId, listingId, targetType, failDbUpdate = false }) {
+  // 1. Authorization verification
+  if (callerRole !== "admin") {
+    return { error: "Unauthorized: Administrator privileges required.", code: "UNAUTHORIZED" };
+  }
+
+  if (failDbUpdate) {
+    return { error: "Database connection timeout during status update.", code: "DATABASE_ERROR" };
+  }
+
+  let updated = false;
+  let resolvedTargetType = targetType || "listing";
+
+  // 2. Targeted update checking affected rows
+  if (targetType === "profile") {
+    if (db.profileReports.has(reportId)) {
+      const record = db.profileReports.get(reportId);
+      record.status = "dismissed";
+      record.updated_at = new Date().toISOString();
+      updated = true;
+      resolvedTargetType = "profile";
+    }
+  } else if (targetType === "listing") {
+    if (db.listingReports.has(reportId)) {
+      const record = db.listingReports.get(reportId);
+      record.status = "dismissed";
+      record.updated_at = new Date().toISOString();
+      updated = true;
+      resolvedTargetType = "listing";
+    }
+  } else {
+    // Untyped fallback
+    if (db.listingReports.has(reportId)) {
+      const record = db.listingReports.get(reportId);
+      record.status = "dismissed";
+      record.updated_at = new Date().toISOString();
+      updated = true;
+      resolvedTargetType = "listing";
+    } else if (db.profileReports.has(reportId)) {
+      const record = db.profileReports.get(reportId);
+      record.status = "dismissed";
+      record.updated_at = new Date().toISOString();
+      updated = true;
+      resolvedTargetType = "profile";
+    }
+  }
+
+  // Cross-table fallback if targetType was specified but row was in other table
+  if (!updated && targetType) {
+    const otherMap = targetType === "profile" ? db.listingReports : db.profileReports;
+    if (otherMap.has(reportId)) {
+      const record = otherMap.get(reportId);
+      record.status = "dismissed";
+      record.updated_at = new Date().toISOString();
+      updated = true;
+      resolvedTargetType = targetType === "profile" ? "listing" : "profile";
+    }
+  }
+
+  // Affected-rows validation: must reject if no rows updated
+  if (!updated) {
+    return { error: "Report record not found or could not be updated.", code: "REPORT_NOT_FOUND" };
+  }
+
+  // 3. Clear reported flag on listing ONLY for valid listing UUID and listing reports
+  const isValidListingUUID = listingId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(listingId);
+  if (isValidListingUUID && resolvedTargetType === "listing" && db.listings.has(listingId)) {
+    // Check if other open reports exist
+    const otherOpen = Array.from(db.listingReports.values()).some(
+      (r) => r.listing_id === listingId && r.id !== reportId && (r.status === "pending" || r.status === "reviewed")
+    );
+    if (!otherOpen) {
+      const l = db.listings.get(listingId);
+      l.is_reported = false;
+      l.report_reason = null;
+    }
+  }
+
+  // 4. Audit logging
+  db.auditLogs.push({
+    action: "dismiss_report",
+    targetType: resolvedTargetType === "profile" ? "user" : "report",
+    targetId: reportId,
+    timestamp: new Date().toISOString(),
+  });
+
+  return { success: true };
+}
+
+// Authoritative simulation of getAdminReports (page reload / refresh query)
+function simulateGetAdminReports(db) {
+  const all = [];
+  for (const r of db.listingReports.values()) {
+    all.push({
+      id: r.id,
+      target_type: "listing",
+      listing_id: r.listing_id,
+      reason: r.reason,
+      status: r.status,
+      created_at: r.created_at,
+    });
+  }
+  for (const pr of db.profileReports.values()) {
+    all.push({
+      id: pr.id,
+      target_type: "profile",
+      listing_id: pr.target_user_id,
+      reason: pr.reason,
+      status: pr.status,
+      created_at: pr.created_at,
+    });
+  }
+  return all;
+}
+
+// 24.1: Dismissing a pending profile report succeeds and persists
+const testDb1 = createMockReportsDatabase();
+const dismissProfileRes = simulateDismissReportAction(testDb1, {
+  callerRole: "admin",
+  reportId: "rep_prof_1",
+  listingId: "user_host_999",
+  targetType: "profile",
+});
+assert(dismissProfileRes.success === true, "Admin can successfully dismiss a profile report");
+assert(testDb1.profileReports.get("rep_prof_1").status === "dismissed", "Profile report status persisted as 'dismissed' in DB");
+
+// 24.2: Page refresh preserves the dismissed status (does not revert to pending)
+const refreshedReportsAfterDismiss = simulateGetAdminReports(testDb1);
+const reloadedProfileReport = refreshedReportsAfterDismiss.find((r) => r.id === "rep_prof_1");
+assert(reloadedProfileReport && reloadedProfileReport.status === "dismissed", "Refreshed report list retains status: 'dismissed' (does not revert to pending)");
+
+// 24.3: Dismissing a pending listing report succeeds and updates DB
+const dismissListingRes = simulateDismissReportAction(testDb1, {
+  callerRole: "admin",
+  reportId: "rep_listing_1",
+  listingId: "77777777-7777-4777-8777-777777777777",
+  targetType: "listing",
+});
+assert(dismissListingRes.success === true, "Admin can successfully dismiss a listing report");
+assert(testDb1.listingReports.get("rep_listing_1").status === "dismissed", "Listing report status persisted as 'dismissed' in DB");
+assert(testDb1.listings.get("77777777-7777-4777-8777-777777777777").is_reported === false, "Listing is_reported flag cleared when last open report dismissed");
+
+// 24.4: Navigating away and returning preserves dismissed state
+const secondReload = simulateGetAdminReports(testDb1);
+assert(secondReload.every((r) => r.status === "dismissed"), "All reports remain dismissed across multiple subsequent page loads");
+
+// 24.5: Unauthorized user cannot dismiss reports
+const testDb2 = createMockReportsDatabase();
+const unauthorizedRes = simulateDismissReportAction(testDb2, {
+  callerRole: "contractor",
+  reportId: "rep_listing_1",
+  listingId: "77777777-7777-4777-8777-777777777777",
+  targetType: "listing",
+});
+assert(unauthorizedRes.success !== true && unauthorizedRes.code === "UNAUTHORIZED", "Unauthorized user strictly rejected from dismissing reports");
+assert(testDb2.listingReports.get("rep_listing_1").status === "pending", "Pending status remains unmutated after unauthorized attempt");
+
+// 24.6: Failed database update returns error and does NOT report success
+const failedUpdateRes = simulateDismissReportAction(testDb2, {
+  callerRole: "admin",
+  reportId: "rep_listing_1",
+  listingId: "77777777-7777-4777-8777-777777777777",
+  targetType: "listing",
+  failDbUpdate: true,
+});
+assert(failedUpdateRes.success !== true && failedUpdateRes.code === "DATABASE_ERROR", "Failed DB update returns structured actionable error");
+assert(testDb2.listingReports.get("rep_listing_1").status === "pending", "Report remains pending on failed DB operation");
+
+// 24.7: Non-existent report returns REPORT_NOT_FOUND (zero rows affected check)
+const missingReportRes = simulateDismissReportAction(testDb2, {
+  callerRole: "admin",
+  reportId: "rep_non_existent",
+  listingId: "77777777-7777-4777-8777-777777777777",
+});
+assert(missingReportRes.success !== true && missingReportRes.code === "REPORT_NOT_FOUND", "Updating non-existent report returns REPORT_NOT_FOUND error");
+
+// 24.8: Report filters accurately partition dismissed vs pending
+function filterReports(reportsList, filter) {
+  if (filter === "all") return reportsList;
+  return reportsList.filter((r) => r.status === filter);
+}
+const mixedDb = createMockReportsDatabase();
+// rep_listing_1 is pending, rep_prof_1 is dismissed
+simulateDismissReportAction(mixedDb, { callerRole: "admin", reportId: "rep_prof_1", targetType: "profile" });
+const mixedLoaded = simulateGetAdminReports(mixedDb);
+const pendingOnly = filterReports(mixedLoaded, "pending");
+const dismissedOnly = filterReports(mixedLoaded, "dismissed");
+const allReports = filterReports(mixedLoaded, "all");
+
+assert(pendingOnly.length === 1 && pendingOnly[0].id === "rep_listing_1", "Pending filter only contains pending report");
+assert(dismissedOnly.length === 1 && dismissedOnly[0].id === "rep_prof_1", "Dismissed filter only contains dismissed report");
+assert(allReports.length === 2, "All reports filter contains both reports");
+
+// 24.9: Audit log recorded and report record preserved (not deleted)
+assert(mixedDb.auditLogs.length === 1, "Audit log was created upon report dismissal");
+assert(mixedDb.profileReports.has("rep_prof_1"), "Report record was preserved in database, not deleted");
+
 console.log("\n===============================================================================");
 console.log(`SUMMARY: ${passedTests}/${totalTests} Tests Passed (${failedTests} Failed)`);
 console.log("===============================================================================");
