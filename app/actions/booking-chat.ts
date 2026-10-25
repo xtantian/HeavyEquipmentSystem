@@ -1,7 +1,7 @@
 "use server";
 
 import { auth } from "@clerk/nextjs/server";
-import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { createSupabaseServerClient, createSupabaseServiceClient } from "@/lib/supabase/server";
 
 export interface BookingMessage {
   id: string;
@@ -106,11 +106,23 @@ export async function getBookingConversationAction(
       conversation.renter_id === userId ? "Equipment Host" : "Verified Renter";
 
     if (otherParticipantId) {
-      const { data: otherProfile } = await supabase
-        .from("profiles")
-        .select("first_name, last_name")
-        .eq("clerk_user_id", otherParticipantId)
-        .maybeSingle();
+      let otherProfile = null;
+      try {
+        const serviceClient = createSupabaseServiceClient();
+        const { data: svcProfile } = await serviceClient
+          .from("profiles")
+          .select("first_name, last_name")
+          .eq("clerk_user_id", otherParticipantId)
+          .maybeSingle();
+        otherProfile = svcProfile;
+      } catch {
+        const { data: userProfile } = await supabase
+          .from("profiles")
+          .select("first_name, last_name")
+          .eq("clerk_user_id", otherParticipantId)
+          .maybeSingle();
+        otherProfile = userProfile;
+      }
 
       if (otherProfile) {
         const full = [otherProfile.first_name, otherProfile.last_name]

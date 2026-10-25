@@ -465,10 +465,21 @@ export async function getUserRentals(userId: string): Promise<DashboardBookingIt
 
       const ownerNameMap = new Map<string, string>();
       if (ownerIds.length > 0) {
-        const { data: ownerProfiles } = await supabase
-          .from("profiles")
-          .select("clerk_user_id, first_name, last_name")
-          .in("clerk_user_id", ownerIds);
+        let ownerProfiles = null;
+        try {
+          const serviceClient = createSupabaseServiceClient();
+          const { data: svcProfiles } = await serviceClient
+            .from("profiles")
+            .select("clerk_user_id, first_name, last_name")
+            .in("clerk_user_id", ownerIds);
+          ownerProfiles = svcProfiles;
+        } catch {
+          const { data: userProfiles } = await supabase
+            .from("profiles")
+            .select("clerk_user_id, first_name, last_name")
+            .in("clerk_user_id", ownerIds);
+          ownerProfiles = userProfiles;
+        }
 
         if (ownerProfiles) {
           for (const p of ownerProfiles) {
@@ -600,10 +611,21 @@ export async function getUserListingsAndIncoming(userId: string): Promise<{
         );
         const renterNameMap = new Map<string, string>();
         if (renterIds.length > 0) {
-          const { data: renterProfiles } = await supabase
-            .from("profiles")
-            .select("clerk_user_id, first_name, last_name")
-            .in("clerk_user_id", renterIds);
+          let renterProfiles = null;
+          try {
+            const serviceClient = createSupabaseServiceClient();
+            const { data: svcProfiles } = await serviceClient
+              .from("profiles")
+              .select("clerk_user_id, first_name, last_name")
+              .in("clerk_user_id", renterIds);
+            renterProfiles = svcProfiles;
+          } catch {
+            const { data: userProfiles } = await supabase
+              .from("profiles")
+              .select("clerk_user_id, first_name, last_name")
+              .in("clerk_user_id", renterIds);
+            renterProfiles = userProfiles;
+          }
 
           if (renterProfiles) {
             for (const p of renterProfiles) {

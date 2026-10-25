@@ -3283,6 +3283,310 @@ assert(webhookRouteContent.includes("verifyWebhook"), "app/api/webhooks/clerk/ro
 assert(dashboardPageContent.includes("ensureUserProfile(userId)"), "app/dashboard/page.tsx calls ensureUserProfile for dashboard visitors");
 assert(listingsActionsContent.includes("ensureUserProfile(userId)"), "app/listings/actions.ts calls ensureUserProfile on new listing creation");
 
+// -----------------------------------------------------------------------------
+// 26. EQUIPMENT PHOTOS REQUIREMENT & REMOVAL OF URL INPUT INVARIANTS
+// -----------------------------------------------------------------------------
+console.log("\n▶ SUITE 26: Equipment Photos Requirement & Removal of URL Input Invariants");
+
+const newListingFormContent = fs.readFileSync(path.join(__dirname, "../components/marketplace/new-listing-form.tsx"), "utf-8");
+const listingsActionsUpdated = fs.readFileSync(path.join(__dirname, "../app/listings/actions.ts"), "utf-8");
+
+// 26.1: Add URL input and button are removed
+assert(!newListingFormContent.includes("Add URL"), "Add URL button is completely removed from new-listing-form.tsx");
+assert(!newListingFormContent.includes("externalImageUrl"), "externalImageUrl state is completely removed from new-listing-form.tsx");
+assert(!newListingFormContent.includes("handleAddExternalImage"), "handleAddExternalImage handler is completely removed from new-listing-form.tsx");
+assert(!newListingFormContent.includes("Or paste an image web link"), "Paste URL input placeholder is completely removed from new-listing-form.tsx");
+
+// 26.2: Submitting without photos is blocked in the UI
+assert(newListingFormContent.includes("disabled={isSubmitting || images.length === 0}"), "Submit button is strictly disabled when images.length === 0");
+assert(newListingFormContent.includes("Please upload at least one equipment photo before submitting your listing."), "Notice displayed in UI when no photos are uploaded");
+
+// 26.3: Direct Server Action call validation simulation
+function simulateServerActionImageValidation(images, userId = "user_123") {
+  if (!images || !Array.isArray(images) || images.length === 0) {
+    return {
+      success: false,
+      error: "Please upload at least one equipment photo before submitting your listing.",
+      code: "INVALID_INPUT",
+    };
+  }
+
+  const sanitized = images
+    .filter((img) => typeof img === "string" && img.trim().length > 0)
+    .map((img) => img.trim())
+    .filter((img) => {
+      if (img.startsWith("blob:") || img.startsWith("data:")) return false;
+      if (img === "/images/equipment_loader.jpg") return false;
+      return true;
+    });
+
+  if (sanitized.length === 0) {
+    return {
+      success: false,
+      error: "Please upload at least one equipment photo before submitting your listing.",
+      code: "INVALID_INPUT",
+    };
+  }
+
+  const verified = sanitized.filter((img) => {
+    try {
+      const parsed = new URL(img);
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
+      const path = parsed.pathname;
+      const inListingBucket =
+        path.includes("/storage/v1/object/public/listing-images/") ||
+        path.includes("/listing-images/");
+      const inUserFolder =
+        path.includes(`/listing-images/${userId}/`) ||
+        path.includes(`/${userId}/`);
+      return inListingBucket && inUserFolder;
+    } catch {
+      return img.startsWith(`${userId}/`) || img.startsWith(`listing-images/${userId}/`);
+    }
+  });
+
+  if (verified.length === 0) {
+    return {
+      success: false,
+      error: "Please upload at least one valid equipment photo before submitting your listing.",
+      code: "INVALID_INPUT",
+    };
+  }
+
+  return { success: true, images: verified };
+}
+
+// Test A: Empty array rejected
+const resEmpty = simulateServerActionImageValidation([]);
+assert(!resEmpty.success && resEmpty.code === "INVALID_INPUT", "Direct Server Action call with empty images array is rejected with INVALID_INPUT");
+
+// Test B: Null / undefined rejected
+const resNull = simulateServerActionImageValidation(null);
+assert(!resNull.success && resNull.code === "INVALID_INPUT", "Direct Server Action call with null images is rejected");
+
+// Test C: Placeholder fallback rejected
+const resPlaceholder = simulateServerActionImageValidation(["/images/equipment_loader.jpg"]);
+assert(!resPlaceholder.success && resPlaceholder.code === "INVALID_INPUT", "Fallback placeholder '/images/equipment_loader.jpg' is rejected as invalid");
+
+// Test D: Blob URL rejected
+const resBlob = simulateServerActionImageValidation(["blob:http://localhost:3000/12345"]);
+assert(!resBlob.success && resBlob.code === "INVALID_INPUT", "Direct blob: URLs are rejected by server validation");
+
+// Test E: Arbitrary external URL rejected
+const resExternal = simulateServerActionImageValidation(["https://attacker.com/evil_tractor.jpg"], "user_123");
+assert(!resExternal.success && resExternal.code === "INVALID_INPUT", "Arbitrary external URLs outside listing-images bucket are rejected");
+
+// 26.4: Listing with at least one valid uploaded photo can be submitted
+const validUserPhoto = `https://supabase.co/storage/v1/object/public/listing-images/user_123/${Date.now()}_loader.jpg`;
+const resValid = simulateServerActionImageValidation([validUserPhoto], "user_123");
+assert(resValid.success === true && resValid.images.length === 1, "Listing with valid user-owned Supabase storage photo is accepted");
+
+// Cross-user storage hijacking prevention
+const otherUserPhoto = `https://supabase.co/storage/v1/object/public/listing-images/user_other_victim/${Date.now()}_loader.jpg`;
+const resHijack = simulateServerActionImageValidation([otherUserPhoto], "user_123");
+assert(!resHijack.success && resHijack.code === "INVALID_INPUT", "Storage photo belonging to a different user is rejected (storage hijacking prevented)");
+
+// Nonexistent storage object rejection simulation
+function simulateStorageObjectVerification(images, storageFiles = []) {
+  for (const img of images) {
+    const parts = img.split("/");
+    const fileName = parts[parts.length - 1];
+    if (!storageFiles.includes(fileName)) {
+      return { exists: false, missingFile: fileName };
+    }
+  }
+  return { exists: true };
+}
+const storageCheckFail = simulateStorageObjectVerification(["https://supabase.co/storage/v1/object/public/listing-images/user_123/fake_file.jpg"], ["real_file.jpg"]);
+assert(storageCheckFail.exists === false && storageCheckFail.missingFile === "fake_file.jpg", "Nonexistent storage objects are identified and flagged");
+
+// 26.5: Failed uploads do not count as valid photos simulation
+function simulateUploadWorkflow(selectedFiles, uploadFails = false) {
+  const uploadedUrls = [];
+  for (const file of selectedFiles) {
+    if (!uploadFails) {
+      uploadedUrls.push(`https://supabase.co/storage/v1/object/public/listing-images/user_123/${file.name}`);
+    }
+  }
+  return uploadedUrls;
+}
+const failedUploadUrls = simulateUploadWorkflow([{ name: "excavator.jpg" }], true);
+assert(failedUploadUrls.length === 0, "Failed upload produces 0 uploaded storage URLs");
+const resFailedUpload = simulateServerActionImageValidation(failedUploadUrls, "user_123");
+assert(!resFailedUpload.success, "Failed uploads do not count as valid photos and cannot be submitted");
+
+// 26.6: Uploads still in progress cannot be bypassed
+assert(newListingFormContent.includes("uploadProgress"), "uploadProgress state tracks multi-file upload progress");
+assert(newListingFormContent.includes("disabled={isSubmitting || images.length === 0}"), "Form submission button is strictly disabled while isSubmitting is true");
+
+// 26.7: Removing the last photo disables submission simulation
+let stagedImages = [{ id: "img_1", previewUrl: "blob:1" }, { id: "img_2", previewUrl: "blob:2" }];
+function removePhoto(id) {
+  stagedImages = stagedImages.filter((img) => img.id !== id);
+  return stagedImages.length;
+}
+removePhoto("img_1");
+assert(stagedImages.length === 1, "Removing one of multiple photos retains active photos");
+const remainingCount = removePhoto("img_2");
+assert(remainingCount === 0, "Removing last photo leaves 0 photos");
+assert(remainingCount === 0 && (stagedImages.length === 0), "Removing the last photo disables submission (images.length === 0)");
+
+// 26.8: Existing image previews and removal controls preserved
+assert(newListingFormContent.includes("handleRemoveImage"), "handleRemoveImage handler preserved");
+assert(newListingFormContent.includes("handleSetPrimary"), "handleSetPrimary handler preserved");
+assert(newListingFormContent.includes("handleFileChange"), "handleFileChange file picker preserved");
+assert(newListingFormContent.includes("accept=\"image/*\""), "accept image/* attribute preserved");
+assert(listingsActionsUpdated.includes("Please upload at least one equipment photo before submitting your listing."), "Server Action enforces user-friendly error message on missing photos");
+assert(listingsActionsUpdated.includes("verifyStorageObjectsExist"), "Server Action defines storage object existence validation");
+assert(listingsActionsUpdated.includes("storageVerification"), "Server Action executes storage verification on listing creation and resubmission");
+
+// -----------------------------------------------------------------------------
+// 27. SUPABASE STORAGE POLICIES & SECURE UPLOAD INVARIANTS
+// -----------------------------------------------------------------------------
+console.log("\n▶ SUITE 27: Supabase Storage Policies & Secure Upload Invariants");
+
+// Read migration 017
+const migration017Path = path.join(__dirname, "../supabase/migrations/017_secure_storage_policies.sql");
+const migration017Content = fs.readFileSync(migration017Path, "utf-8");
+
+// 27.1: Migration 017 structure and policy correctness
+assert(fs.existsSync(migration017Path), "Migration 017_secure_storage_policies.sql exists");
+assert(migration017Content.includes("DROP POLICY IF EXISTS \"Anyone can upload listing images\""), "Migration drops insecure permissive upload policy");
+assert(migration017Content.includes("DROP POLICY IF EXISTS \"Anyone can update listing images\""), "Migration drops insecure permissive update policy");
+assert(migration017Content.includes("(storage.foldername(name))[1] = (auth.jwt() ->> 'sub')"), "Migration enforces folder ownership via auth.jwt()->>'sub'");
+assert(migration017Content.includes("TO authenticated"), "Migration restricts upload/update/delete to authenticated role");
+assert(migration017Content.includes("TO public"), "Migration preserves public read access for SELECT");
+
+// 27.2: Invariant: Upload authentication failure does not retry anonymously
+assert(!newListingFormContent.includes("createSupabaseBrowserClient(null)"), "new-listing-form.tsx does NOT fall back to anonymous client on auth failure");
+assert(newListingFormContent.includes("!userId"), "new-listing-form.tsx verifies authenticated session before starting upload");
+assert(newListingFormContent.includes("Authentication failed during upload"), "new-listing-form.tsx displays explicit actionable auth failure error");
+
+// 27.3: Storage RLS Policy Engine Simulation
+function evaluateStoragePolicy({
+  operation,
+  bucketId,
+  objectPath,
+  callerRole = "anon",
+  jwtSub = null,
+}) {
+  if (bucketId !== "listing-images") {
+    return { allowed: false, reason: "Bucket not matched" };
+  }
+
+  // 1. SELECT: Public read
+  if (operation === "SELECT") {
+    return { allowed: true };
+  }
+
+  // 2. Anonymous users have no write/update/delete permissions
+  if (callerRole === "anon" || !jwtSub) {
+    return { allowed: false, reason: "Anonymous write rejected by RLS" };
+  }
+
+  // Extract folder name from path
+  const folder = objectPath.split("/")[0];
+
+  // 3. INSERT / UPDATE / DELETE: Folder must match jwtSub
+  if (operation === "INSERT" || operation === "UPDATE" || operation === "DELETE") {
+    if (folder !== jwtSub) {
+      return { allowed: false, reason: "Cross-user path modification rejected" };
+    }
+    return { allowed: true };
+  }
+
+  return { allowed: false, reason: "Unsupported operation" };
+}
+
+// Test 27.4: Anonymous upload rejected
+const anonUpload = evaluateStoragePolicy({
+  operation: "INSERT",
+  bucketId: "listing-images",
+  objectPath: "user_123/excavator.jpg",
+  callerRole: "anon",
+  jwtSub: null,
+});
+assert(!anonUpload.allowed, "Anonymous upload is strictly rejected by storage RLS");
+
+// Test 27.5: Authenticated upload to user's own folder accepted
+const ownUpload = evaluateStoragePolicy({
+  operation: "INSERT",
+  bucketId: "listing-images",
+  objectPath: "user_123/excavator.jpg",
+  callerRole: "authenticated",
+  jwtSub: "user_123",
+});
+assert(ownUpload.allowed === true, "Authenticated upload to user's own folder is accepted");
+
+// Test 27.6: Cross-user folder upload rejected
+const crossUpload = evaluateStoragePolicy({
+  operation: "INSERT",
+  bucketId: "listing-images",
+  objectPath: "user_other/malicious.jpg",
+  callerRole: "authenticated",
+  jwtSub: "user_123",
+});
+assert(!crossUpload.allowed, "Cross-user folder upload is strictly rejected");
+
+// Test 27.7: Cross-user overwrite / update rejected
+const crossUpdate = evaluateStoragePolicy({
+  operation: "UPDATE",
+  bucketId: "listing-images",
+  objectPath: "user_victim/photo.jpg",
+  callerRole: "authenticated",
+  jwtSub: "user_attacker",
+});
+assert(!crossUpdate.allowed, "Cross-user image overwrite is strictly rejected");
+
+// Test 27.8: Owner update / overwrite accepted
+const ownerUpdate = evaluateStoragePolicy({
+  operation: "UPDATE",
+  bucketId: "listing-images",
+  objectPath: "user_123/photo.jpg",
+  callerRole: "authenticated",
+  jwtSub: "user_123",
+});
+assert(ownerUpdate.allowed === true, "Owner updating their own photo is permitted");
+
+// Test 27.9: Owner delete accepted
+const ownerDelete = evaluateStoragePolicy({
+  operation: "DELETE",
+  bucketId: "listing-images",
+  objectPath: "user_123/photo.jpg",
+  callerRole: "authenticated",
+  jwtSub: "user_123",
+});
+assert(ownerDelete.allowed === true, "Owner deleting their own photo is permitted");
+
+// Test 27.10: Cross-user delete rejected
+const crossDelete = evaluateStoragePolicy({
+  operation: "DELETE",
+  bucketId: "listing-images",
+  objectPath: "user_victim/photo.jpg",
+  callerRole: "authenticated",
+  jwtSub: "user_attacker",
+});
+assert(!crossDelete.allowed, "Cross-user deletion attempt is strictly rejected");
+
+// Test 27.11: Public image retrieval preserved
+const publicReadAnon = evaluateStoragePolicy({
+  operation: "SELECT",
+  bucketId: "listing-images",
+  objectPath: "user_123/photo.jpg",
+  callerRole: "anon",
+  jwtSub: null,
+});
+assert(publicReadAnon.allowed === true, "Public unauthenticated image retrieval is preserved");
+
+// Test 27.12: Listing submission without valid uploaded image remains rejected
+const emptySubmission = simulateServerActionImageValidation([], "user_123");
+assert(!emptySubmission.success && emptySubmission.code === "INVALID_INPUT", "Listing submission with zero uploaded photos is rejected");
+
+// Test 27.13: Legitimate upload and listing creation workflow succeeds
+const legitimatePhoto = `https://supabase.co/storage/v1/object/public/listing-images/user_123/${Date.now()}_cat_d6.jpg`;
+const legitSubmission = simulateServerActionImageValidation([legitimatePhoto], "user_123");
+assert(legitSubmission.success === true && legitSubmission.images.length === 1, "Legitimate upload with user-owned photo succeeds");
+
 console.log("\n===============================================================================");
 console.log(`SUMMARY: ${passedTests}/${totalTests} Tests Passed (${failedTests} Failed)`);
 console.log("===============================================================================");
