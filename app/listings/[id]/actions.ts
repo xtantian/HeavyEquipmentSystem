@@ -1,11 +1,12 @@
 "use server";
 
 // [IMPORT] Load Clerk authentication, ISO date parsing helpers, Supabase client, and price calculation utilities.
-import { auth, currentUser } from "@clerk/nextjs/server";
+import { auth } from "@clerk/nextjs/server";
 import { parseISO, isBefore, startOfToday } from "date-fns";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { RESERVATION_BLOCKING_STATUSES } from "@/lib/supabase/marketplace";
 import { calculateInclusiveRentalDays, calculateRentalTotalPrice } from "@/lib/utils";
+import { ensureUserProfile } from "@/lib/supabase/profile";
 
 // [TYPE] Interface specifying input parameters for requesting an equipment booking.
 export interface CreateBookingParams {
@@ -162,40 +163,13 @@ export async function createBookingAction(
     // Perform an authoritative lazy-sync using the authenticated currentUser() session.
     if (!userProfile) {
       try {
-        const user = await currentUser();
-        if (user && user.id === userId) {
-          const primaryEmail =
-            user.emailAddresses.find((e) => e.id === user.primaryEmailAddressId)
-              ?.emailAddress ?? user.emailAddresses[0]?.emailAddress ?? null;
-
-          const { data: syncedProfile, error: syncError } = await supabase
-            .from("profiles")
-            .upsert(
-              {
-                clerk_user_id: user.id,
-                email: primaryEmail,
-                first_name: user.firstName ?? null,
-                last_name: user.lastName ?? null,
-                avatar_url: user.imageUrl || null,
-                role: "customer",
-                status: "active",
-                updated_at: new Date().toISOString(),
-              },
-              {
-                onConflict: "clerk_user_id",
-                ignoreDuplicates: false,
-              }
-            )
-            .select("status")
-            .single();
-
-          if (!syncError && syncedProfile) {
-            userProfile = syncedProfile;
-            console.info("[createBookingAction] Auto-synced missing user profile on demand:", {
-              correlationId,
-              userId,
-            });
-          }
+        const synced = await ensureUserProfile(userId);
+        if (synced) {
+          userProfile = { status: synced.status };
+          console.info("[createBookingAction] Auto-synced missing user profile on demand:", {
+            correlationId,
+            userId,
+          });
         }
       } catch (syncErr) {
         console.warn("[createBookingAction] Lazy profile sync attempt failed:", syncErr);

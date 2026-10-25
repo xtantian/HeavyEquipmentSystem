@@ -4,6 +4,7 @@ import { Navbar } from "@/components/landing/navbar";
 import { Footer } from "@/components/landing/footer";
 import { DashboardTabs } from "@/components/dashboard/dashboard-tabs";
 import { getUserRentals, getUserListingsAndIncoming } from "@/lib/supabase/marketplace";
+import { ensureUserProfile } from "@/lib/supabase/profile";
 
 export const metadata = {
   title: "Rental & Listings Dashboard | Rent It Marketplace",
@@ -16,6 +17,9 @@ export default async function DashboardPage() {
   if (!userId) {
     redirect("/sign-in?redirect_url=/dashboard");
   }
+
+  // Ensure user profile exists in Supabase (self-healing / lazy sync)
+  await ensureUserProfile(userId);
 
   // 2. Fetch user's rentals, listings, incoming booking requests, and rental history
   const [rentals, { listings, incomingBookings, rentalHistory }] = await Promise.all([

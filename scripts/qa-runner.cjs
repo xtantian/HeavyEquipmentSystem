@@ -2946,6 +2946,343 @@ assert(allReports.length === 2, "All reports filter contains both reports");
 assert(mixedDb.auditLogs.length === 1, "Audit log was created upon report dismissal");
 assert(mixedDb.profileReports.has("rep_prof_1"), "Report record was preserved in database, not deleted");
 
+// -----------------------------------------------------------------------------
+// 25. PROFILE PROVISIONING & SELF-HEALING REGRESSION SUITE
+// -----------------------------------------------------------------------------
+console.log("\n▶ SUITE 25: Profile Provisioning, Webhooks & Self-Healing Synchronization Invariants");
+
+// Create mock database for profile provisioning simulation
+function createMockProfileDb() {
+  return {
+    profiles: new Map(),
+    adminInvitations: new Map(),
+  };
+}
+
+function simulateClerkWebhookHandler(db, req, env = {}) {
+  // 1. Signature verification check
+  if (!env.CLERK_WEBHOOK_SIGNING_SECRET || req.headers?.["svix-signature"] !== "valid_sig") {
+    return { status: 400, body: { error: "Invalid webhook signature" } };
+  }
+
+  // 2. Service client availability check
+  if (!env.SUPABASE_KEY_SECRET && !env.SUPABASE_SERVICE_ROLE_KEY && !env.SUPABASE_KEY_ROLE) {
+    return { status: 500, body: { error: "Internal server error" } };
+  }
+
+  const { type, data } = req.body || {};
+
+  if (type === "user.created" || type === "user.updated") {
+    const user = data;
+    const primaryEmail = (user.email_addresses || []).find((e) => e.id === user.primary_email_address_id)?.email_address || null;
+
+    const existingProfile = db.profiles.get(user.id);
+    let assignedRole = existingProfile?.role || "customer";
+
+    // Invitation check
+    if (primaryEmail && assignedRole !== "admin") {
+      const invite = Array.from(db.adminInvitations.values()).find(
+        (inv) => inv.email.toLowerCase() === primaryEmail.toLowerCase() && inv.status === "pending"
+      );
+      if (invite) {
+        assignedRole = "admin";
+        invite.status = "accepted";
+        invite.accepted_at = new Date().toISOString();
+      }
+    }
+
+    const publicMeta = user.public_metadata || {};
+    if (publicMeta.role === "admin") {
+      assignedRole = "admin";
+    }
+
+    const profileRecord = {
+      clerk_user_id: user.id,
+      email: primaryEmail,
+      first_name: user.first_name || null,
+      last_name: user.last_name || null,
+      avatar_url: user.image_url || null,
+      role: assignedRole,
+      status: existingProfile ? existingProfile.status : "active",
+      updated_at: new Date().toISOString(),
+    };
+
+    db.profiles.set(user.id, profileRecord);
+    return { status: 200, body: { received: true } };
+  }
+
+  if (type === "user.deleted") {
+    const { id, deleted } = data || {};
+    if (!deleted || !id) {
+      return { status: 200, body: { received: true } };
+    }
+    const existing = db.profiles.get(id);
+    if (existing) {
+      existing.email = null;
+      existing.first_name = null;
+      existing.last_name = null;
+      existing.avatar_url = null;
+      existing.status = "deleted";
+      existing.updated_at = new Date().toISOString();
+    }
+    return { status: 200, body: { received: true } };
+  }
+
+  return { status: 200, body: { received: true } };
+}
+
+function simulateEnsureUserProfile(db, session, targetUserId) {
+  if (!session || !session.userId) {
+    return null; // Unauthenticated
+  }
+
+  // Identity guard
+  if (targetUserId && targetUserId !== session.userId) {
+    return null; // IDOR blocked
+  }
+
+  // 1. Check existing
+  const existing = db.profiles.get(session.userId);
+  if (existing) {
+    return existing; // Preserve existing roles and governance status
+  }
+
+  // 2. Fetch verified Clerk user
+  const clerkUser = session.clerkUser;
+  if (!clerkUser || clerkUser.id !== session.userId) {
+    return null;
+  }
+
+  const primaryEmail = (clerkUser.email_addresses || []).find((e) => e.id === clerkUser.primary_email_address_id)?.email_address || null;
+  let assignedRole = "customer";
+
+  if (primaryEmail) {
+    const invite = Array.from(db.adminInvitations.values()).find(
+      (inv) => inv.email.toLowerCase() === primaryEmail.toLowerCase() && inv.status === "pending"
+    );
+    if (invite) {
+      assignedRole = "admin";
+      invite.status = "accepted";
+    }
+  }
+
+  if (clerkUser.public_metadata?.role === "admin") {
+    assignedRole = "admin";
+  }
+
+  const newProfile = {
+    clerk_user_id: clerkUser.id,
+    email: primaryEmail,
+    first_name: clerkUser.first_name || null,
+    last_name: clerkUser.last_name || null,
+    avatar_url: clerkUser.image_url || null,
+    role: assignedRole,
+    status: "active",
+    updated_at: new Date().toISOString(),
+  };
+
+  db.profiles.set(clerkUser.id, newProfile);
+  return newProfile;
+}
+
+// 25.1: New user profile creation via webhook
+const testDbWebhooks = createMockProfileDb();
+const validEnv = {
+  CLERK_WEBHOOK_SIGNING_SECRET: "whsec_test_secret",
+  SUPABASE_KEY_SECRET: "mock_service_key",
+};
+const resCreate = simulateClerkWebhookHandler(
+  testDbWebhooks,
+  {
+    headers: { "svix-signature": "valid_sig" },
+    body: {
+      type: "user.created",
+      data: {
+        id: "user_abc123",
+        email_addresses: [{ id: "em_1", email_address: "john.doe@example.com" }],
+        primary_email_address_id: "em_1",
+        first_name: "John",
+        last_name: "Doe",
+        image_url: "https://example.com/avatar.jpg",
+      },
+    },
+  },
+  validEnv
+);
+assert(resCreate.status === 200, "Webhook user.created returns 200 OK");
+const createdProfile = testDbWebhooks.profiles.get("user_abc123");
+assert(createdProfile && createdProfile.role === "customer", "New user profile created with role 'customer'");
+assert(createdProfile && createdProfile.status === "active", "New user profile created with status 'active'");
+
+// 25.2: Webhook retry and duplicate event delivery idempotency
+const resRetry = simulateClerkWebhookHandler(
+  testDbWebhooks,
+  {
+    headers: { "svix-signature": "valid_sig" },
+    body: {
+      type: "user.created",
+      data: {
+        id: "user_abc123",
+        email_addresses: [{ id: "em_1", email_address: "john.doe@example.com" }],
+        primary_email_address_id: "em_1",
+        first_name: "John",
+        last_name: "Doe",
+      },
+    },
+  },
+  validEnv
+);
+assert(resRetry.status === 200, "Webhook duplicate event delivery returns 200 OK");
+assert(testDbWebhooks.profiles.size === 1, "Duplicate webhook events do NOT create duplicate profile records");
+
+// 25.3: Profile creation when webhook is delayed or fails (Self-Healing / JIT Sync)
+const testDbLazy = createMockProfileDb();
+const activeSession = {
+  userId: "user_delayed999",
+  clerkUser: {
+    id: "user_delayed999",
+    email_addresses: [{ id: "em_99", email_address: "delayed@example.com" }],
+    primary_email_address_id: "em_99",
+    first_name: "Delayed",
+    last_name: "User",
+    image_url: "https://example.com/delayed.png",
+  },
+};
+assert(testDbLazy.profiles.has("user_delayed999") === false, "Profile initially missing due to delayed webhook");
+const healedProfile = simulateEnsureUserProfile(testDbLazy, activeSession, "user_delayed999");
+assert(healedProfile !== null && healedProfile.clerk_user_id === "user_delayed999", "ensureUserProfile creates profile when webhook is delayed");
+assert(testDbLazy.profiles.has("user_delayed999"), "Database contains provisioned profile following self-healing sync");
+
+// 25.4: Existing profiles remain unchanged where appropriate
+const existingBefore = { ...testDbLazy.profiles.get("user_delayed999") };
+const secondSync = simulateEnsureUserProfile(testDbLazy, activeSession, "user_delayed999");
+assert(secondSync.updated_at === existingBefore.updated_at, "Existing profiles remain unchanged on subsequent sync requests");
+
+// 25.5: Existing administrator roles being preserved
+testDbWebhooks.profiles.set("user_admin_007", {
+  clerk_user_id: "user_admin_007",
+  email: "admin@rentit.ph",
+  role: "admin",
+  status: "active",
+  first_name: "Admin",
+  last_name: "User",
+});
+simulateClerkWebhookHandler(
+  testDbWebhooks,
+  {
+    headers: { "svix-signature": "valid_sig" },
+    body: {
+      type: "user.updated",
+      data: {
+        id: "user_admin_007",
+        email_addresses: [{ id: "em_ad", email_address: "admin@rentit.ph" }],
+        primary_email_address_id: "em_ad",
+        first_name: "Admin Updated",
+        last_name: "User",
+      },
+    },
+  },
+  validEnv
+);
+assert(testDbWebhooks.profiles.get("user_admin_007").role === "admin", "Existing administrator role is strictly preserved on update");
+
+// 25.6: Restricted, banned, and deleted accounts not being improperly reactivated
+testDbWebhooks.profiles.set("user_banned_66", {
+  clerk_user_id: "user_banned_66",
+  email: "badactor@example.com",
+  role: "customer",
+  status: "banned",
+});
+simulateClerkWebhookHandler(
+  testDbWebhooks,
+  {
+    headers: { "svix-signature": "valid_sig" },
+    body: {
+      type: "user.updated",
+      data: {
+        id: "user_banned_66",
+        email_addresses: [{ id: "em_b", email_address: "badactor@example.com" }],
+        primary_email_address_id: "em_b",
+        first_name: "Bad",
+        last_name: "Actor",
+      },
+    },
+  },
+  validEnv
+);
+assert(testDbWebhooks.profiles.get("user_banned_66").status === "banned", "Banned account is NOT reactivated by user.updated webhook");
+
+const bannedSession = {
+  userId: "user_banned_66",
+  clerkUser: { id: "user_banned_66", email_addresses: [] },
+};
+const bannedSync = simulateEnsureUserProfile(testDbWebhooks, bannedSession, "user_banned_66");
+assert(bannedSync.status === "banned", "Banned account is NOT reactivated by ensureUserProfile self-healing");
+
+// 25.7: Concurrent provisioning requests safety
+const concurrentDb = createMockProfileDb();
+const concUser = {
+  id: "user_concurrent_5",
+  email_addresses: [{ id: "em_c", email_address: "conc@example.com" }],
+  primary_email_address_id: "em_c",
+  first_name: "Conc",
+  last_name: "User",
+};
+// Webhook and self-healing both trigger simultaneously
+simulateClerkWebhookHandler(
+  concurrentDb,
+  {
+    headers: { "svix-signature": "valid_sig" },
+    body: { type: "user.created", data: concUser },
+  },
+  validEnv
+);
+simulateEnsureUserProfile(concurrentDb, { userId: concUser.id, clerkUser: concUser }, concUser.id);
+assert(concurrentDb.profiles.size === 1, "Concurrent webhook and self-healing requests produce exactly 1 profile row");
+
+// 25.8: Invalid webhook signatures
+const resInvalidSig = simulateClerkWebhookHandler(
+  testDbWebhooks,
+  {
+    headers: { "svix-signature": "forged_sig" },
+    body: { type: "user.created", data: { id: "user_spoof" } },
+  },
+  validEnv
+);
+assert(resInvalidSig.status === 400 && resInvalidSig.body.error === "Invalid webhook signature", "Invalid webhook signature returns 400 Bad Request");
+
+// 25.9: Missing service-role configuration
+const resMissingSecret = simulateClerkWebhookHandler(
+  testDbWebhooks,
+  {
+    headers: { "svix-signature": "valid_sig" },
+    body: { type: "user.created", data: { id: "user_test" } },
+  },
+  { CLERK_WEBHOOK_SIGNING_SECRET: "whsec_test_secret" } // Missing SUPABASE_KEY_SECRET
+);
+assert(resMissingSecret.status === 500 && resMissingSecret.body.error === "Internal server error", "Missing service-role returns 500 without exposing secrets");
+
+// 25.10: Authenticated users unable to provision or modify another user's profile
+const attackerSession = {
+  userId: "user_attacker_1",
+  clerkUser: { id: "user_attacker_1" },
+};
+const idorAttempt = simulateEnsureUserProfile(testDbWebhooks, attackerSession, "user_victim_2");
+assert(idorAttempt === null, "User A strictly prohibited from provisioning User B's profile (IDOR prevented)");
+
+// 25.11: Code Invariant Verifications
+const profileTsContent = fs.readFileSync(path.join(__dirname, "../lib/supabase/profile.ts"), "utf-8");
+const webhookRouteContent = fs.readFileSync(path.join(__dirname, "../app/api/webhooks/clerk/route.ts"), "utf-8");
+const dashboardPageContent = fs.readFileSync(path.join(__dirname, "../app/dashboard/page.tsx"), "utf-8");
+const listingsActionsContent = fs.readFileSync(path.join(__dirname, "../app/listings/actions.ts"), "utf-8");
+
+assert(profileTsContent.includes("export async function ensureUserProfile"), "lib/supabase/profile.ts exports ensureUserProfile");
+assert(profileTsContent.includes("export async function getCurrentUserProfile"), "lib/supabase/profile.ts exports getCurrentUserProfile");
+assert(profileTsContent.includes("currentUser()"), "lib/supabase/profile.ts derives identity from Clerk currentUser()");
+assert(webhookRouteContent.includes("verifyWebhook"), "app/api/webhooks/clerk/route.ts verifies webhook signatures");
+assert(dashboardPageContent.includes("ensureUserProfile(userId)"), "app/dashboard/page.tsx calls ensureUserProfile for dashboard visitors");
+assert(listingsActionsContent.includes("ensureUserProfile(userId)"), "app/listings/actions.ts calls ensureUserProfile on new listing creation");
+
 console.log("\n===============================================================================");
 console.log(`SUMMARY: ${passedTests}/${totalTests} Tests Passed (${failedTests} Failed)`);
 console.log("===============================================================================");

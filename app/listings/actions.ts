@@ -4,6 +4,7 @@
 import { auth } from "@clerk/nextjs/server";
 import { revalidatePath } from "next/cache";
 import { createSupabaseServerClient, createSupabaseServiceClient } from "@/lib/supabase/server";
+import { ensureUserProfile } from "@/lib/supabase/profile";
 import type { Json } from "@/lib/supabase/types";
 import {
   evaluateDuplicateSignals,
@@ -141,11 +142,18 @@ export async function createListingAction(
 
     // 3. Verify user account governance status
     // [DB] + [METHOD] Query the user's account status from the profiles table.
-    const { data: userProfile } = await supabase
+    let { data: userProfile } = await supabase
       .from("profiles")
       .select("status")
       .eq("clerk_user_id", userId)
       .maybeSingle();
+
+    if (!userProfile) {
+      const synced = await ensureUserProfile(userId);
+      if (synced) {
+        userProfile = { status: synced.status };
+      }
+    }
 
     // [IF] + [RETURN] Prevent restricted users from publishing listings.
     if (userProfile?.status === "restricted") {
@@ -557,11 +565,18 @@ export async function resubmitListingAction(
     const supabase = await createSupabaseServerClient();
 
     // 1. Caller Profile Governance Check
-    const { data: userProfile, error: profileError } = await supabase
+    let { data: userProfile, error: profileError } = await supabase
       .from("profiles")
       .select("status")
-      .eq("id", userId)
+      .eq("clerk_user_id", userId)
       .maybeSingle();
+
+    if (!userProfile && !profileError) {
+      const synced = await ensureUserProfile(userId);
+      if (synced) {
+        userProfile = { status: synced.status };
+      }
+    }
 
     if (profileError) {
       console.warn("[resubmitListingAction] Profile status lookup warning:", profileError.message);
