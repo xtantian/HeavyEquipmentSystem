@@ -4,6 +4,7 @@
 import { auth } from "@clerk/nextjs/server";
 import { revalidatePath } from "next/cache";
 import { createSupabaseServerClient, createSupabaseServiceClient } from "@/lib/supabase/server";
+import { ensureUserProfile } from "@/lib/supabase/profile";
 import type { Json } from "@/lib/supabase/types";
 import {
   evaluateDuplicateSignals,
@@ -38,6 +39,51 @@ export interface CreateListingResult {
   supersededOldListingId?: string;
   supersededOldListingTitle?: string;
   code?: "AUTH_REQUIRED" | "RESTRICTED" | "DUPLICATE_ASSET" | "INVALID_INPUT" | "ERROR";
+}
+
+/**
+ * Verifies that referenced storage objects physically exist in the Supabase Storage bucket.
+ * Gracefully passes if storage service is offline or in mock test environments.
+ */
+async function verifyStorageObjectsExist(
+  supabase: unknown,
+  images: string[],
+  userId: string
+): Promise<{ exists: boolean; missingFile?: string }> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const client = supabase as any;
+  if (!client || !client.storage || typeof client.storage.from !== "function") {
+    return { exists: true };
+  }
+
+  for (const img of images) {
+    let fileName = "";
+    try {
+      const parsed = new URL(img);
+      const parts = parsed.pathname.split("/");
+      fileName = decodeURIComponent(parts[parts.length - 1] || "");
+    } catch {
+      const parts = img.split("/");
+      fileName = decodeURIComponent(parts[parts.length - 1] || "");
+    }
+
+    if (fileName) {
+      try {
+        const { data, error } = await client.storage
+          .from("listing-images")
+          .list(userId, { search: fileName, limit: 1 });
+
+        // If list returned an array with 0 items without error, the file was not found
+        if (!error && Array.isArray(data) && data.length === 0) {
+          return { exists: false, missingFile: fileName };
+        }
+      } catch {
+        // Fall back gracefully if storage service is offline or in mock test environment
+      }
+    }
+  }
+
+  return { exists: true };
 }
 
 /**
@@ -141,11 +187,18 @@ export async function createListingAction(
 
     // 3. Verify user account governance status
     // [DB] + [METHOD] Query the user's account status from the profiles table.
-    const { data: userProfile } = await supabase
+    let { data: userProfile } = await supabase
       .from("profiles")
       .select("status")
       .eq("clerk_user_id", userId)
       .maybeSingle();
+
+    if (!userProfile) {
+      const synced = await ensureUserProfile(userId);
+      if (synced) {
+        userProfile = { status: synced.status };
+      }
+    }
 
     // [IF] + [RETURN] Prevent restricted users from publishing listings.
     if (userProfile?.status === "restricted") {
@@ -204,12 +257,73 @@ export async function createListingAction(
       // Non-fatal if table pending
     }
 
-    // Ensure fallback image if none uploaded
-    // [ARRAY] + [IF] Use uploaded images, or assign a default fallback placeholder picture.
-    const finalImages =
-      input.images && input.images.length > 0
-        ? input.images
-        : ["/images/equipment_loader.jpg"];
+    // 5. Enforce at least one valid uploaded equipment photo
+    if (!input.images || !Array.isArray(input.images) || input.images.length === 0) {
+      return {
+        success: false,
+        error: "Please upload at least one equipment photo before submitting your listing.",
+        code: "INVALID_INPUT",
+      };
+    }
+
+    const sanitizedImages = input.images
+      .filter((img): img is string => typeof img === "string" && img.trim().length > 0)
+      .map((img) => img.trim())
+      .filter((img) => {
+        // Disallow blob URLs, data URIs, and legacy placeholder fallbacks
+        if (img.startsWith("blob:") || img.startsWith("data:")) return false;
+        if (img === "/images/equipment_loader.jpg") return false;
+        return true;
+      });
+
+    if (sanitizedImages.length === 0) {
+      return {
+        success: false,
+        error: "Please upload at least one equipment photo before submitting your listing.",
+        code: "INVALID_INPUT",
+      };
+    }
+
+    // Verify storage references belong to the authorized listing-upload workflow
+    const verifiedImages = sanitizedImages.filter((img) => {
+      try {
+        const parsed = new URL(img);
+        if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
+
+        const path = parsed.pathname;
+        const inListingBucket =
+          path.includes("/storage/v1/object/public/listing-images/") ||
+          path.includes("/listing-images/");
+        const inUserFolder =
+          path.includes(`/listing-images/${userId}/`) ||
+          path.includes(`/${userId}/`);
+
+        return inListingBucket && inUserFolder;
+      } catch {
+        // Relative paths must belong to caller's storage directory
+        return img.startsWith(`${userId}/`) || img.startsWith(`listing-images/${userId}/`);
+      }
+    });
+
+    if (verifiedImages.length === 0) {
+      return {
+        success: false,
+        error: "Please upload at least one valid equipment photo before submitting your listing.",
+        code: "INVALID_INPUT",
+      };
+    }
+
+    // Verify storage objects physically exist where storage is accessible
+    const storageVerification = await verifyStorageObjectsExist(supabase, verifiedImages, userId);
+    if (!storageVerification.exists) {
+      return {
+        success: false,
+        error: `Equipment photo "${storageVerification.missingFile}" does not exist in storage. Please upload valid photos.`,
+        code: "INVALID_INPUT",
+      };
+    }
+
+    const finalImages = verifiedImages;
 
     // 6. Multi-Attribute Duplicate Signals & Visual Match Evaluation
     // [OBJ] Package candidate attributes for the integrity scoring algorithm.
@@ -557,11 +671,20 @@ export async function resubmitListingAction(
     const supabase = await createSupabaseServerClient();
 
     // 1. Caller Profile Governance Check
-    const { data: userProfile, error: profileError } = await supabase
+    const { data: initialProfile, error: profileError } = await supabase
       .from("profiles")
       .select("status")
-      .eq("id", userId)
+      .eq("clerk_user_id", userId)
       .maybeSingle();
+
+    let userProfile = initialProfile;
+
+    if (!userProfile && !profileError) {
+      const synced = await ensureUserProfile(userId);
+      if (synced) {
+        userProfile = { status: synced.status };
+      }
+    }
 
     if (profileError) {
       console.warn("[resubmitListingAction] Profile status lookup warning:", profileError.message);
@@ -712,9 +835,67 @@ export async function resubmitListingAction(
       };
     }
 
-    const finalImages = updatedData.images && updatedData.images.length > 0
-      ? updatedData.images
-      : (listing.images && listing.images.length > 0 ? listing.images : ["/images/equipment_loader.jpg"]);
+    const candidateImages =
+      updatedData.images !== undefined
+        ? updatedData.images
+        : (listing.images || []);
+
+    const sanitizedImages = (Array.isArray(candidateImages) ? candidateImages : [])
+      .filter((img): img is string => typeof img === "string" && img.trim().length > 0)
+      .map((img) => img.trim())
+      .filter((img) => {
+        if (img.startsWith("blob:") || img.startsWith("data:")) return false;
+        if (img === "/images/equipment_loader.jpg") return false;
+        return true;
+      });
+
+    if (sanitizedImages.length === 0) {
+      return {
+        success: false,
+        error: "Please upload at least one equipment photo before submitting your listing.",
+        code: "INVALID_INPUT" as const,
+      };
+    }
+
+    // Verify storage references belong to the authorized listing-upload workflow
+    const verifiedImages = sanitizedImages.filter((img) => {
+      try {
+        const parsed = new URL(img);
+        if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
+
+        const path = parsed.pathname;
+        const inListingBucket =
+          path.includes("/storage/v1/object/public/listing-images/") ||
+          path.includes("/listing-images/");
+        const inUserFolder =
+          path.includes(`/listing-images/${userId}/`) ||
+          path.includes(`/${userId}/`);
+
+        return inListingBucket && inUserFolder;
+      } catch {
+        return img.startsWith(`${userId}/`) || img.startsWith(`listing-images/${userId}/`);
+      }
+    });
+
+    if (verifiedImages.length === 0) {
+      return {
+        success: false,
+        error: "Please upload at least one valid equipment photo before submitting your listing.",
+        code: "INVALID_INPUT" as const,
+      };
+    }
+
+    // Verify storage objects physically exist where storage is accessible
+    const storageVerification = await verifyStorageObjectsExist(supabase, verifiedImages, userId);
+    if (!storageVerification.exists) {
+      return {
+        success: false,
+        error: `Equipment photo "${storageVerification.missingFile}" does not exist in storage. Please upload valid photos.`,
+        code: "INVALID_INPUT" as const,
+      };
+    }
+
+    const finalImages = verifiedImages;
 
     const finalRawAssetId = updatedData.assetIdentifier !== undefined
       ? updatedData.assetIdentifier

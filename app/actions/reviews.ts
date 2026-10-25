@@ -42,6 +42,135 @@ export interface SubmitListerReviewResult {
  * 9. Inserts using authenticated Supabase client
  * 10. Revalidates relevant paths
  */
+interface AuthoritativeBookingParticipantContext {
+  booking: {
+    id: string;
+    renter_id: string;
+    status: string;
+    listing_id: string;
+  };
+  listingOwnerId: string | null;
+  listingId: string | null;
+}
+
+type RawBookingRecord = {
+  id: string;
+  renter_id: string;
+  status: string;
+  listing_id: string;
+  listing?: unknown;
+};
+
+/**
+ * Authoritatively resolves a booking and its parent listing owner.
+ *
+ * Guarantees:
+ * 1. Checks user-scoped RLS client first, falling back to elevated service client
+ *    if the user's Third-Party Auth token was blocked or unmapped in PostgREST.
+ * 2. Correctly inspects both object and array representations of embedded listing relations.
+ * 3. Falls back to direct listing lookup by listing_id to guarantee the owner ID is resolved
+ *    even when the listing is not in 'available' status (e.g. rented or reserved).
+ */
+async function resolveAuthoritativeBooking(
+  bookingId: string
+): Promise<AuthoritativeBookingParticipantContext | null> {
+  let rawBooking: RawBookingRecord | null = null;
+
+  try {
+    const supabase = await createSupabaseServerClient();
+    const { data, error } = await supabase
+      .from("bookings")
+      .select(`
+        id,
+        renter_id,
+        status,
+        listing_id,
+        listing:listings(id, owner_id)
+      `)
+      .eq("id", bookingId)
+      .maybeSingle();
+
+    if (!error && data) {
+      rawBooking = data as unknown as RawBookingRecord;
+    }
+  } catch (err) {
+    console.warn("[resolveAuthoritativeBooking] User client query warning:", err);
+  }
+
+  // Elevate to service role client if user client query failed or returned no rows due to RLS
+  if (!rawBooking) {
+    try {
+      const serviceClient = createSupabaseServiceClient();
+      const { data: svcData, error: svcError } = await serviceClient
+        .from("bookings")
+        .select(`
+          id,
+          renter_id,
+          status,
+          listing_id,
+          listing:listings(id, owner_id)
+        `)
+        .eq("id", bookingId)
+        .maybeSingle();
+
+      if (!svcError && svcData) {
+        rawBooking = svcData as unknown as RawBookingRecord;
+      }
+    } catch (err) {
+      console.error("[resolveAuthoritativeBooking] Service client query error:", err);
+    }
+  }
+
+  if (!rawBooking) {
+    return null;
+  }
+
+  // Extract listing owner ID and listing ID from embedded relation
+  let listingOwnerId: string | null = null;
+  let listingId: string | null = rawBooking.listing_id || null;
+
+  const rawListing = rawBooking.listing;
+  if (Array.isArray(rawListing) && rawListing.length > 0) {
+    const first = rawListing[0] as { id?: string; owner_id?: string } | null;
+    if (first?.owner_id) listingOwnerId = first.owner_id;
+    if (first?.id) listingId = first.id;
+  } else if (rawListing && typeof rawListing === "object") {
+    const obj = rawListing as { id?: string; owner_id?: string };
+    if (obj.owner_id) listingOwnerId = obj.owner_id;
+    if (obj.id) listingId = obj.id;
+  }
+
+  // Direct lookup fallback if listing relation was omitted by PostgREST RLS
+  if (!listingOwnerId && rawBooking.listing_id) {
+    try {
+      const serviceClient = createSupabaseServiceClient();
+      const { data: directListing } = await serviceClient
+        .from("listings")
+        .select("id, owner_id")
+        .eq("id", rawBooking.listing_id)
+        .maybeSingle();
+
+      if (directListing) {
+        listingOwnerId = directListing.owner_id;
+        listingId = directListing.id;
+      }
+    } catch (err) {
+      console.warn("[resolveAuthoritativeBooking] Direct listing lookup error:", err);
+    }
+  }
+
+  return {
+    booking: {
+      id: rawBooking.id,
+      renter_id: rawBooking.renter_id,
+      status: rawBooking.status,
+      listing_id: rawBooking.listing_id,
+    },
+    listingOwnerId,
+    listingId,
+  };
+}
+
 export async function submitListerReviewAction(
   params: SubmitListerReviewParams
 ): Promise<SubmitListerReviewResult> {
@@ -74,27 +203,16 @@ export async function submitListerReviewAction(
   }
 
   try {
-    const supabase = await createSupabaseServerClient();
-
     // 4. Fetch booking and corresponding listing to determine eligibility & lister ownership
-    const { data: booking, error: fetchError } = await supabase
-      .from("bookings")
-      .select(`
-        id,
-        renter_id,
-        status,
-        listing_id,
-        listing:listings(id, owner_id)
-      `)
-      .eq("id", bookingId)
-      .maybeSingle();
-
-    if (fetchError || !booking) {
+    const resolved = await resolveAuthoritativeBooking(bookingId);
+    if (!resolved) {
       return {
         error: "Booking record not found.",
         code: "BOOKING_NOT_FOUND",
       };
     }
+
+    const { booking, listingOwnerId, listingId } = resolved;
 
     // 5. Verify caller is the actual renter of this booking (prevents IDOR)
     if (booking.renter_id !== userId) {
@@ -114,8 +232,7 @@ export async function submitListerReviewAction(
     }
 
     // 7. Resolve authoritative lister_id
-    const listingData = booking.listing as unknown as { id: string; owner_id: string } | null;
-    const listerId = listingData?.owner_id;
+    const listerId = listingOwnerId;
     if (!listerId) {
       return {
         error: "Unable to verify the equipment owner for this rental.",
@@ -132,7 +249,8 @@ export async function submitListerReviewAction(
     }
 
     // 9. Prevent duplicate review for this booking
-    const { data: existingReview } = await supabase
+    const serviceClient = createSupabaseServiceClient();
+    const { data: existingReview } = await serviceClient
       .from("lister_reviews")
       .select("id")
       .eq("booking_id", bookingId)
@@ -147,7 +265,7 @@ export async function submitListerReviewAction(
     }
 
     // 10. Perform authoritative database insertion
-    const { data: newReview, error: insertError } = await supabase
+    const { data: newReview, error: insertError } = await serviceClient
       .from("lister_reviews")
       .insert({
         booking_id: bookingId,
@@ -159,19 +277,18 @@ export async function submitListerReviewAction(
       .select("id")
       .single();
 
-    if (insertError) {
+    if (insertError || !newReview) {
       if (
-        insertError.code === "23505" ||
-        insertError.message?.toLowerCase().includes("unique") ||
-        insertError.message?.toLowerCase().includes("unique_booking_reviewer")
+        insertError?.code === "23505" ||
+        insertError?.message?.toLowerCase().includes("unique") ||
+        insertError?.message?.toLowerCase().includes("unique_booking_reviewer")
       ) {
         return {
           error: "A review has already been submitted for this booking.",
           code: "ALREADY_REVIEWED",
         };
       }
-
-      console.error("[submitListerReviewAction] DB insert error:", insertError.message);
+      console.error("[submitListerReviewAction] DB insert error:", insertError?.message);
       return {
         error: "Failed to save review in database. Please try again.",
         code: "DATABASE_ERROR",
@@ -181,13 +298,13 @@ export async function submitListerReviewAction(
     // 11. Revalidate routes
     revalidatePath("/dashboard");
     revalidatePath(`/profile/${listerId}`);
-    if (listingData?.id) {
-      revalidatePath(`/listings/${listingData.id}`);
+    if (listingId) {
+      revalidatePath(`/listings/${listingId}`);
     }
 
     return {
       success: true,
-      reviewId: newReview?.id,
+      reviewId: newReview.id,
     };
   } catch (err) {
     console.error("[submitListerReviewAction] Server exception:", err);
@@ -258,26 +375,14 @@ export async function submitPreliminaryFeedbackAction(
   }
 
   try {
-    const supabase = await createSupabaseServerClient();
-
-    const { data: booking, error: fetchError } = await supabase
-      .from("bookings")
-      .select(`
-        id,
-        renter_id,
-        status,
-        listing:listings(id, owner_id)
-      `)
-      .eq("id", bookingId)
-      .maybeSingle();
-
-    if (fetchError || !booking) {
+    const resolved = await resolveAuthoritativeBooking(bookingId);
+    if (!resolved) {
       return { error: "Booking record not found.", code: "BOOKING_NOT_FOUND" };
     }
 
-    const listingOwnerId = (booking.listing as unknown as { owner_id?: string } | null)?.owner_id;
+    const { booking, listingOwnerId } = resolved;
     const isRenter = booking.renter_id === userId;
-    const isOwner = listingOwnerId === userId;
+    const isOwner = Boolean(listingOwnerId && listingOwnerId === userId);
 
     if (!isRenter && !isOwner) {
       return {
@@ -297,12 +402,17 @@ export async function submitPreliminaryFeedbackAction(
 
     const counterpartyId = isRenter ? listingOwnerId : booking.renter_id;
     if (!counterpartyId) {
+      console.warn(
+        `[submitPreliminaryFeedbackAction] Could not resolve counterparty: bookingId=${bookingId}, isRenter=${isRenter}, listingOwnerId=${listingOwnerId}, renter_id=${booking.renter_id}`
+      );
       return { error: "Could not resolve booking counterparty.", code: "DATABASE_ERROR" };
     }
 
+    const serviceClient = createSupabaseServiceClient();
+
     // Check for existing preliminary feedback from this user
     try {
-      const { data: existing } = await supabase
+      const { data: existing } = await serviceClient
         .from("preliminary_feedback")
         .select("id")
         .eq("booking_id", bookingId)
@@ -315,12 +425,11 @@ export async function submitPreliminaryFeedbackAction(
           code: "ALREADY_SUBMITTED",
         };
       }
-    } catch {
-      // Ignore if table check fails in dev
+    } catch (checkErr) {
+      console.warn("[submitPreliminaryFeedbackAction] Duplicate check warning:", checkErr);
     }
 
     // Insert feedback
-    let feedbackId: string | undefined;
     const payload = {
       booking_id: bookingId,
       submitted_by: userId,
@@ -328,32 +437,34 @@ export async function submitPreliminaryFeedbackAction(
       notes: sanitizedNotes,
     };
 
-    try {
-      const { data: inserted, error: insErr } = await supabase
-        .from("preliminary_feedback")
-        .insert(payload)
-        .select("id")
-        .single();
+    const { data: inserted, error: insErr } = await serviceClient
+      .from("preliminary_feedback")
+      .insert(payload)
+      .select("id")
+      .single();
 
-      if (insErr) {
-        const serviceClient = createSupabaseServiceClient();
-        const { data: svcIns } = await serviceClient
-          .from("preliminary_feedback")
-          .insert(payload)
-          .select("id")
-          .single();
-        feedbackId = svcIns?.id;
-      } else {
-        feedbackId = inserted?.id;
+    if (insErr || !inserted) {
+      if (
+        insErr?.code === "23505" ||
+        insErr?.message?.toLowerCase().includes("unique") ||
+        insErr?.message?.toLowerCase().includes("unique_preliminary_feedback")
+      ) {
+        return {
+          error: "You have already submitted preliminary coordination feedback for this booking.",
+          code: "ALREADY_SUBMITTED",
+        };
       }
-    } catch (e) {
-      console.warn("[submitPreliminaryFeedbackAction] insertion fallback:", e);
+      console.error("[submitPreliminaryFeedbackAction] DB insert error:", insErr?.message);
+      return {
+        error: "Failed to save coordination feedback in database.",
+        code: "DATABASE_ERROR",
+      };
     }
 
     revalidatePath("/dashboard");
     return {
       success: true,
-      feedbackId: feedbackId || "feedback_saved",
+      feedbackId: inserted.id,
     };
   } catch (err) {
     console.error("[submitPreliminaryFeedbackAction] Exception:", err);
@@ -417,24 +528,13 @@ export async function submitRenterReviewAction(
   }
 
   try {
-    const supabase = await createSupabaseServerClient();
-
-    const { data: booking, error: fetchError } = await supabase
-      .from("bookings")
-      .select(`
-        id,
-        renter_id,
-        status,
-        listing:listings(id, owner_id)
-      `)
-      .eq("id", bookingId)
-      .maybeSingle();
-
-    if (fetchError || !booking) {
+    const resolved = await resolveAuthoritativeBooking(bookingId);
+    if (!resolved) {
       return { error: "Booking record not found.", code: "BOOKING_NOT_FOUND" };
     }
 
-    const listingOwnerId = (booking.listing as unknown as { owner_id?: string } | null)?.owner_id;
+    const { booking, listingOwnerId } = resolved;
+
     if (listingOwnerId !== userId) {
       return {
         error: "Unauthorized: Only the equipment host can review the renter.",
@@ -456,9 +556,11 @@ export async function submitRenterReviewAction(
       };
     }
 
+    const serviceClient = createSupabaseServiceClient();
+
     // Check if review already exists
     try {
-      const { data: existing } = await supabase
+      const { data: existing } = await serviceClient
         .from("renter_reviews")
         .select("id")
         .eq("booking_id", bookingId)
@@ -475,7 +577,6 @@ export async function submitRenterReviewAction(
       // Non-fatal if table check errors
     }
 
-    let reviewId: string | undefined;
     const payload = {
       booking_id: bookingId,
       reviewer_id: userId,
@@ -484,26 +585,28 @@ export async function submitRenterReviewAction(
       comment: sanitizedComment,
     };
 
-    try {
-      const { data: inserted, error: insErr } = await supabase
-        .from("renter_reviews")
-        .insert(payload)
-        .select("id")
-        .single();
+    const { data: inserted, error: insErr } = await serviceClient
+      .from("renter_reviews")
+      .insert(payload)
+      .select("id")
+      .single();
 
-      if (insErr) {
-        const serviceClient = createSupabaseServiceClient();
-        const { data: svcIns } = await serviceClient
-          .from("renter_reviews")
-          .insert(payload)
-          .select("id")
-          .single();
-        reviewId = svcIns?.id;
-      } else {
-        reviewId = inserted?.id;
+    if (insErr || !inserted) {
+      if (
+        insErr?.code === "23505" ||
+        insErr?.message?.toLowerCase().includes("unique") ||
+        insErr?.message?.toLowerCase().includes("unique_renter_review")
+      ) {
+        return {
+          error: "You have already reviewed the renter for this booking.",
+          code: "ALREADY_REVIEWED",
+        };
       }
-    } catch (e) {
-      console.warn("[submitRenterReviewAction] insertion fallback:", e);
+      console.error("[submitRenterReviewAction] DB insert error:", insErr?.message);
+      return {
+        error: "Failed to save the review in database.",
+        code: "DATABASE_ERROR",
+      };
     }
 
     revalidatePath("/dashboard");
@@ -511,7 +614,7 @@ export async function submitRenterReviewAction(
 
     return {
       success: true,
-      reviewId: reviewId || "review_recorded",
+      reviewId: inserted.id,
     };
   } catch (err) {
     console.error("[submitRenterReviewAction] Exception:", err);

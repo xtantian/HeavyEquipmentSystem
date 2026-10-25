@@ -38,6 +38,7 @@ import type { MarketplaceListingItem } from "@/lib/marketplace/mock-listings";
 import type { ListingStatus } from "@/lib/supabase/types";
 import {
   updateBookingStatusAction,
+  completeBookingAction,
   deleteUserListingAction,
   archiveUserListingAction,
   toggleListingAvailabilityAction,
@@ -106,6 +107,14 @@ export function DashboardTabs({
     id: string;
     title: string;
     renterName: string;
+  } | null>(null);
+
+  const [completingBooking, setCompletingBooking] = React.useState<{
+    id: string;
+    title: string;
+    isRenter: boolean;
+    listerName?: string;
+    renterName?: string;
   } | null>(null);
 
   // Accessible Resubmission Modal state for editing rejected listings
@@ -356,6 +365,53 @@ export function DashboardTabs({
       showNotification("Failed to decline booking request. Please try again.", "info");
     } finally {
       setLoadingActions((prev) => ({ ...prev, [bookingId]: false }));
+    }
+  };
+
+  // Complete rental transaction action (Single-party completion)
+  const handleConfirmComplete = async () => {
+    if (!completingBooking) return;
+    const bookingId = completingBooking.id;
+    setLoadingActions((prev) => ({ ...prev, [bookingId]: true }));
+    try {
+      const res = await completeBookingAction(bookingId);
+      if (!res.success) {
+        showNotification(res.error || "Failed to mark rental as completed.", "info");
+      } else {
+        // Optimistically mark booking as completed
+        setRentals((prev) =>
+          prev.map((item) =>
+            item.id === bookingId ? { ...item, status: "completed" as const } : item
+          )
+        );
+        setIncomingBookings((prev) =>
+          prev.map((item) =>
+            item.id === bookingId ? { ...item, status: "completed" as const } : item
+          )
+        );
+
+        const wasRenter = completingBooking.isRenter;
+        const listerName = completingBooking.listerName || "Equipment Host";
+        setCompletingBooking(null);
+
+        if (wasRenter) {
+          showNotification("Rental transaction completed! Please leave your feedback for the host.", "success");
+          // Immediately prompt the review modal for the renter
+          setReviewingBooking({
+            id: bookingId,
+            listerName,
+            mode: "lister",
+          });
+        } else {
+          showNotification("Rental transaction marked as completed! Renter can now leave a verified review.", "success");
+        }
+      }
+    } catch (err) {
+      console.error("Complete booking error:", err);
+      showNotification("Failed to finalize booking completion. Please try again.", "info");
+    } finally {
+      setLoadingActions((prev) => ({ ...prev, [bookingId]: false }));
+      setCompletingBooking(null);
     }
   };
 
@@ -769,6 +825,30 @@ export function DashboardTabs({
                             </Button>
                           )}
 
+                          {/* Mark as Done button for renter */}
+                          {["accepted", "paid", "active", "returned"].includes(booking.status) && (
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              disabled={isActionLoading}
+                              onClick={() =>
+                                setCompletingBooking({
+                                  id: booking.id,
+                                  title: listing?.title || "Equipment Rental",
+                                  isRenter: true,
+                                  listerName:
+                                    booking.lister_name ||
+                                    (listing?.title ? `Owner of ${listing.title}` : "Equipment Host"),
+                                })
+                              }
+                              className="text-xs font-semibold border-emerald-600/40 text-emerald-700 dark:text-emerald-400 hover:bg-emerald-500/10 h-7 px-2.5 cursor-pointer"
+                            >
+                              <CheckCircle2 className="mr-1 h-3 w-3" />
+                              Mark as Done
+                            </Button>
+                          )}
+
                           {canCancel && (
                             <Button
                               type="button"
@@ -1016,6 +1096,28 @@ export function DashboardTabs({
                                 >
                                   <CheckCircle2 className="mr-1 h-3 w-3" />
                                   Feedback
+                                </Button>
+                              )}
+
+                              {/* Mark as Done button for equipment host on active/accepted rental */}
+                              {["accepted", "paid", "active", "returned"].includes(request.status) && (
+                                <Button
+                                  type="button"
+                                  variant="outline"
+                                  size="sm"
+                                  disabled={isActionLoading}
+                                  onClick={() =>
+                                    setCompletingBooking({
+                                      id: request.id,
+                                      title: listing?.title || "Rental Request",
+                                      isRenter: false,
+                                      renterName: request.renter_name || "Verified Renter",
+                                    })
+                                  }
+                                  className="text-xs font-semibold border-emerald-600/40 text-emerald-700 dark:text-emerald-400 hover:bg-emerald-500/10 h-7 px-2.5 cursor-pointer"
+                                >
+                                  <CheckCircle2 className="mr-1 h-3 w-3" />
+                                  Mark as Done
                                 </Button>
                               )}
 
@@ -1403,6 +1505,14 @@ export function DashboardTabs({
           isOpen={true}
           onClose={() => setChattingBooking(null)}
           currentUserId={_userId || ""}
+          onBookingCompleted={(completedBookingId) => {
+            setRentals((prev) =>
+              prev.map((b) => (b.id === completedBookingId ? { ...b, status: "completed" as const } : b))
+            );
+            setIncomingBookings((prev) =>
+              prev.map((b) => (b.id === completedBookingId ? { ...b, status: "completed" as const } : b))
+            );
+          }}
         />
       )}
 
@@ -1631,6 +1741,76 @@ export function DashboardTabs({
                 className="text-xs font-semibold cursor-pointer"
               >
                 Decline Request
+              </Button>
+            </div>
+          </Card>
+        </div>
+      )}
+
+      {/* Accessible Confirmation Modal: Mark as Done (Single-Party Rental Completion) */}
+      {completingBooking && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 animate-in fade-in duration-200">
+          <Card className="w-full max-w-md rounded-2xl border border-border bg-card p-6 shadow-2xl space-y-4">
+            <div className="flex items-center gap-3 text-emerald-600 dark:text-emerald-500">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-emerald-500/10 border border-emerald-500/20">
+                <CheckCircle2 className="h-5 w-5" />
+              </div>
+              <div>
+                <h3 className="font-heading text-base font-bold text-foreground">
+                  Mark Rental as Done?
+                </h3>
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  Single-party completion confirmation
+                </p>
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-border/60 bg-muted/30 p-3.5 text-xs text-muted-foreground space-y-2">
+              <p className="font-semibold text-foreground">
+                Transaction: {completingBooking.title}
+              </p>
+              <p>
+                Confirming this action immediately finalizes the rental and transitions the booking to <strong>completed</strong>.
+              </p>
+              <p className="text-foreground/80">
+                Approval from the second party is not required.
+              </p>
+              {completingBooking.isRenter && (
+                <p className="text-emerald-700 dark:text-emerald-400 font-medium pt-1">
+                  ★ You will immediately be invited to leave a verified 1–5 star review and feedback for the equipment host.
+                </p>
+              )}
+            </div>
+
+            <div className="flex items-center justify-end gap-3 pt-2">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={Boolean(loadingActions[completingBooking.id])}
+                onClick={() => setCompletingBooking(null)}
+                className="text-xs font-semibold cursor-pointer"
+              >
+                Cancel
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                disabled={Boolean(loadingActions[completingBooking.id])}
+                onClick={handleConfirmComplete}
+                className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold shadow-sm cursor-pointer"
+              >
+                {loadingActions[completingBooking.id] ? (
+                  <>
+                    <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                    Completing...
+                  </>
+                ) : (
+                  <>
+                    <CheckCircle2 className="mr-1.5 h-3.5 w-3.5" />
+                    Confirm & Mark Done
+                  </>
+                )}
               </Button>
             </div>
           </Card>

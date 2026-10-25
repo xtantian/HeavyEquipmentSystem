@@ -2,7 +2,12 @@ import "server-only";
 
 import { unstable_cache } from "next/cache";
 import { createClient } from "@supabase/supabase-js";
-import { createSupabaseServerClient, getSupabaseUrl, getSupabasePublishableKey } from "./server";
+import {
+  createSupabaseServerClient,
+  createSupabaseServiceClient,
+  getSupabaseUrl,
+  getSupabasePublishableKey,
+} from "./server";
 import type { Database, CategoryRow } from "./types";
 import { MARKETPLACE_CATEGORIES } from "@/lib/marketplace/categories";
 import { MOCK_LISTINGS, MOCK_BOOKINGS, type MarketplaceListingItem } from "@/lib/marketplace/mock-listings";
@@ -403,12 +408,14 @@ export interface DashboardBookingItem {
   is_reviewed?: boolean;
   renter_name?: string | null;
   lister_name?: string | null;
+  completed_by?: string | null;
+  completed_at?: string | null;
 }
 
 export async function getUserRentals(userId: string): Promise<DashboardBookingItem[]> {
   try {
     const supabase = await createSupabaseServerClient();
-    const { data, error } = await supabase
+    let { data, error } = await supabase
       .from("bookings")
       .select(`
         *,
@@ -420,6 +427,31 @@ export async function getUserRentals(userId: string): Promise<DashboardBookingIt
       `)
       .eq("renter_id", userId)
       .order("created_at", { ascending: false });
+
+    if (error || !data || data.length === 0) {
+      try {
+        const serviceClient = createSupabaseServiceClient();
+        const { data: svcData, error: svcError } = await serviceClient
+          .from("bookings")
+          .select(`
+            *,
+            listing:listings(
+              *,
+              category:categories(*),
+              listing_images(*)
+            )
+          `)
+          .eq("renter_id", userId)
+          .order("created_at", { ascending: false });
+
+        if (!svcError && svcData && svcData.length > 0) {
+          data = svcData;
+          error = null;
+        }
+      } catch (svcErr) {
+        console.warn("[supabase] Service client fallback in getUserRentals:", svcErr);
+      }
+    }
 
     if (!error && data) {
       // 1. Resolve host/lister names for renter dashboard cards & review modal
@@ -433,10 +465,21 @@ export async function getUserRentals(userId: string): Promise<DashboardBookingIt
 
       const ownerNameMap = new Map<string, string>();
       if (ownerIds.length > 0) {
-        const { data: ownerProfiles } = await supabase
-          .from("profiles")
-          .select("clerk_user_id, first_name, last_name")
-          .in("clerk_user_id", ownerIds);
+        let ownerProfiles = null;
+        try {
+          const serviceClient = createSupabaseServiceClient();
+          const { data: svcProfiles } = await serviceClient
+            .from("profiles")
+            .select("clerk_user_id, first_name, last_name")
+            .in("clerk_user_id", ownerIds);
+          ownerProfiles = svcProfiles;
+        } catch {
+          const { data: userProfiles } = await supabase
+            .from("profiles")
+            .select("clerk_user_id, first_name, last_name")
+            .in("clerk_user_id", ownerIds);
+          ownerProfiles = userProfiles;
+        }
 
         if (ownerProfiles) {
           for (const p of ownerProfiles) {
@@ -521,7 +564,7 @@ export async function getUserListingsAndIncoming(userId: string): Promise<{
     // 2. Fetch all bookings for these listings
     if (listings.length > 0) {
       const listingIds = listings.map((l) => l.id);
-      const { data: bkData, error: bkError } = await supabase
+      let { data: bkData, error: bkError } = await supabase
         .from("bookings")
         .select(`
           *,
@@ -534,6 +577,31 @@ export async function getUserListingsAndIncoming(userId: string): Promise<{
         .in("listing_id", listingIds)
         .order("created_at", { ascending: false });
 
+      if (bkError || !bkData || bkData.length === 0) {
+        try {
+          const serviceClient = createSupabaseServiceClient();
+          const { data: svcBk, error: svcBkError } = await serviceClient
+            .from("bookings")
+            .select(`
+              *,
+              listing:listings(
+                *,
+                category:categories(*),
+                listing_images(*)
+              )
+            `)
+            .in("listing_id", listingIds)
+            .order("created_at", { ascending: false });
+
+          if (!svcBkError && svcBk && svcBk.length > 0) {
+            bkData = svcBk;
+            bkError = null;
+          }
+        } catch (svcErr) {
+          console.warn("[supabase] Service client fallback in getUserListingsAndIncoming:", svcErr);
+        }
+      }
+
       if (!bkError && bkData) {
         const allBookings = bkData as unknown as DashboardBookingItem[];
 
@@ -543,10 +611,21 @@ export async function getUserListingsAndIncoming(userId: string): Promise<{
         );
         const renterNameMap = new Map<string, string>();
         if (renterIds.length > 0) {
-          const { data: renterProfiles } = await supabase
-            .from("profiles")
-            .select("clerk_user_id, first_name, last_name")
-            .in("clerk_user_id", renterIds);
+          let renterProfiles = null;
+          try {
+            const serviceClient = createSupabaseServiceClient();
+            const { data: svcProfiles } = await serviceClient
+              .from("profiles")
+              .select("clerk_user_id, first_name, last_name")
+              .in("clerk_user_id", renterIds);
+            renterProfiles = svcProfiles;
+          } catch {
+            const { data: userProfiles } = await supabase
+              .from("profiles")
+              .select("clerk_user_id, first_name, last_name")
+              .in("clerk_user_id", renterIds);
+            renterProfiles = userProfiles;
+          }
 
           if (renterProfiles) {
             for (const p of renterProfiles) {

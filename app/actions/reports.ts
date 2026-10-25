@@ -274,28 +274,36 @@ export async function updateReportStatusAction(
       // Map newStatus to listing_reports status column
       const dbStatus = newStatus === "resolved" ? "action_taken" : newStatus === "under_review" ? "reviewed" : newStatus;
 
-      const { error } = await serviceClient
+      const { data, error } = await serviceClient
         .from("listing_reports")
         .update({
           status: dbStatus as unknown as "pending",
           updated_at: new Date().toISOString(),
         })
-        .eq("id", reportId);
+        .eq("id", reportId)
+        .select("id");
 
       if (error) {
         return { error: error.message };
       }
+      if (!data || data.length === 0) {
+        return { error: "Listing report not found or could not be updated." };
+      }
     } else {
-      try {
-        await serviceClient
-          .from("profile_reports")
-          .update({
-            status: newStatus as "pending" | "under_review" | "resolved" | "dismissed" | "escalated",
-            updated_at: new Date().toISOString(),
-          })
-          .eq("id", reportId);
-      } catch (err) {
-        console.warn("[updateReportStatusAction] profile_reports update warning:", err);
+      const { data, error } = await serviceClient
+        .from("profile_reports")
+        .update({
+          status: newStatus as "pending" | "under_review" | "resolved" | "dismissed" | "escalated",
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", reportId)
+        .select("id");
+
+      if (error) {
+        return { error: error.message };
+      }
+      if (!data || data.length === 0) {
+        return { error: "Profile report not found or could not be updated." };
       }
     }
 

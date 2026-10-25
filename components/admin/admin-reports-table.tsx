@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import {
   Flag,
   AlertTriangle,
@@ -24,9 +25,15 @@ interface AdminReportsTableProps {
 }
 
 export function AdminReportsTable({ initialReports }: AdminReportsTableProps) {
+  const router = useRouter();
   const [reports, setReports] = React.useState<AdminReportItem[]>(initialReports);
   const [statusFilter, setStatusFilter] = React.useState<string>("all");
   const [notification, setNotification] = React.useState<{ text: string; type: "success" | "error" } | null>(null);
+
+  // Synchronize internal state with fresh server props upon revalidation or navigation
+  React.useEffect(() => {
+    setReports(initialReports);
+  }, [initialReports]);
 
   // Dialog State
   const [confirmDialog, setConfirmDialog] = React.useState<{
@@ -61,34 +68,37 @@ export function AdminReportsTable({ initialReports }: AdminReportsTableProps) {
 
     try {
       if (type === "restrict") {
-        setReports((prev) =>
-          prev.map((r) => (r.id === report.id ? { ...r, status: "action_taken" } : r))
-        );
         const res = await restrictListingAction(report.listing_id, report.reason);
         if (res.error) {
           showNotification(res.error, "error");
         } else {
+          setReports((prev) =>
+            prev.map((r) => (r.id === report.id ? { ...r, status: "action_taken" } : r))
+          );
           showNotification(`Listing restricted following violation review.`, "success");
+          router.refresh();
         }
       } else if (type === "delete") {
-        setReports((prev) =>
-          prev.map((r) => (r.id === report.id ? { ...r, status: "action_taken" } : r))
-        );
         const res = await softDeleteListingAction(report.listing_id, report.reason);
         if (res.error) {
           showNotification(res.error, "error");
         } else {
+          setReports((prev) =>
+            prev.map((r) => (r.id === report.id ? { ...r, status: "action_taken" } : r))
+          );
           showNotification(`Listing soft-deleted.`, "success");
+          router.refresh();
         }
       } else if (type === "dismiss") {
-        setReports((prev) =>
-          prev.map((r) => (r.id === report.id ? { ...r, status: "dismissed" } : r))
-        );
-        const res = await dismissReportAction(report.id, report.listing_id);
+        const res = await dismissReportAction(report.id, report.listing_id, report.target_type);
         if (res.error) {
           showNotification(res.error, "error");
         } else {
+          setReports((prev) =>
+            prev.map((r) => (r.id === report.id ? { ...r, status: "dismissed" } : r))
+          );
           showNotification("Report marked as dismissed.", "success");
+          router.refresh();
         }
       }
     } catch (err: unknown) {

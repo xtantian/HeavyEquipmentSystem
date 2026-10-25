@@ -34,14 +34,25 @@ export default async function AdminLayout({
   let pendingReportsCount = 0;
   try {
     const supabase = await createSupabaseServerClient();
-    const { count } = await supabase
+    const { count: listCount } = await supabase
       .from("listing_reports")
       .select("*", { count: "exact", head: true })
       .eq("status", "pending");
 
-    if (count !== null && count !== undefined) {
-      pendingReportsCount = count;
+    if (listCount !== null && listCount !== undefined) {
+      pendingReportsCount += listCount;
     }
+
+    try {
+      const { count: profCount } = await supabase
+        .from("profile_reports" as unknown as "listing_reports")
+        .select("*", { count: "exact", head: true })
+        .eq("status", "pending");
+
+      if (profCount !== null && profCount !== undefined) {
+        pendingReportsCount += profCount;
+      }
+    } catch {}
   } catch {}
 
   return (

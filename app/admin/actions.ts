@@ -550,30 +550,165 @@ export async function updateListingStatusAdminAction(listingId: string, newStatu
 }
 
 /**
- * Dismiss or resolve a listing violation report
+ * Dismiss or resolve a violation report (either listing report or profile report).
+ * Persists status: 'dismissed' into the authoritative database table, checks affected rows,
+ * and clears the listing flag if no other active reports exist.
  */
-export async function dismissReportAction(reportId: string, listingId?: string) {
+export async function dismissReportAction(
+  reportId: string,
+  listingId?: string,
+  targetType?: "listing" | "profile"
+) {
   try {
     const { adminId, adminEmail } = await verifyAdminCaller();
     const supabase = await getAdminActionClient();
 
-    await supabase
-      .from("listing_reports")
-      .update({ status: "dismissed", updated_at: new Date().toISOString() })
-      .eq("id", reportId);
+    let updated = false;
+    let resolvedTargetType: "listing" | "profile" = targetType || "listing";
 
-    if (listingId) {
-      await supabase
-        .from("listings")
-        .update({ is_reported: false, report_reason: null })
-        .eq("id", listingId);
+    // 1. If explicitly marked as profile or not specified, attempt authoritative table update
+    if (targetType === "profile") {
+      const { data, error } = await supabase
+        .from("profile_reports")
+        .update({
+          status: "dismissed",
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", reportId)
+        .select("id");
+
+      if (error) {
+        console.error("[dismissReportAction] profile_reports update error:", error.message);
+        throw new Error(error.message);
+      }
+      if (data && data.length > 0) {
+        updated = true;
+        resolvedTargetType = "profile";
+      }
+    } else if (targetType === "listing") {
+      const { data, error } = await supabase
+        .from("listing_reports")
+        .update({
+          status: "dismissed",
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", reportId)
+        .select("id");
+
+      if (error) {
+        console.error("[dismissReportAction] listing_reports update error:", error.message);
+        throw new Error(error.message);
+      }
+      if (data && data.length > 0) {
+        updated = true;
+        resolvedTargetType = "listing";
+      }
+    } else {
+      // Target type not specified: try listing_reports first
+      const { data: listData, error: listError } = await supabase
+        .from("listing_reports")
+        .update({
+          status: "dismissed",
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", reportId)
+        .select("id");
+
+      if (listError) {
+        console.error("[dismissReportAction] listing_reports update error:", listError.message);
+      } else if (listData && listData.length > 0) {
+        updated = true;
+        resolvedTargetType = "listing";
+      }
+
+      // If not updated in listing_reports, try profile_reports
+      if (!updated) {
+        const { data: profData, error: profError } = await supabase
+          .from("profile_reports")
+          .update({
+            status: "dismissed",
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", reportId)
+          .select("id");
+
+        if (profError) {
+          console.error("[dismissReportAction] profile_reports update error:", profError.message);
+        } else if (profData && profData.length > 0) {
+          updated = true;
+          resolvedTargetType = "profile";
+        }
+      }
     }
 
-    await recordAdminAudit(adminId, adminEmail, "dismiss_report", "report", reportId);
+    // 2. Cross-table fallback: if targetType was explicitly passed but row was not found, check the other table
+    if (!updated && targetType) {
+      const fallbackTable = targetType === "profile" ? "listing_reports" : "profile_reports";
+      const { data: fbData, error: fbErr } = await supabase
+        .from(fallbackTable)
+        .update({
+          status: "dismissed",
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", reportId)
+        .select("id");
 
+      if (!fbErr && fbData && fbData.length > 0) {
+        updated = true;
+        resolvedTargetType = targetType === "profile" ? "listing" : "profile";
+      }
+    }
+
+    if (!updated) {
+      return {
+        error: "Report record not found or could not be updated.",
+        code: "REPORT_NOT_FOUND",
+      };
+    }
+
+    // 3. Clear reported flag on listing ONLY if it was a listing report AND listingId is a valid UUID
+    const isValidListingUUID =
+      listingId &&
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(listingId);
+
+    if (isValidListingUUID && resolvedTargetType === "listing") {
+      try {
+        const { data: otherOpenReports } = await supabase
+          .from("listing_reports")
+          .select("id")
+          .eq("listing_id", listingId)
+          .in("status", ["pending", "reviewed"])
+          .neq("id", reportId);
+
+        if (!otherOpenReports || otherOpenReports.length === 0) {
+          await supabase
+            .from("listings")
+            .update({ is_reported: false, report_reason: null })
+            .eq("id", listingId);
+        }
+      } catch (listingErr) {
+        console.warn("[dismissReportAction] Listing flag update non-fatal warning:", listingErr);
+      }
+    }
+
+    // 4. Record audit log
+    await recordAdminAudit(
+      adminId,
+      adminEmail,
+      "dismiss_report",
+      resolvedTargetType === "profile" ? "user" : "report",
+      reportId,
+      {
+        targetType: resolvedTargetType,
+        listingId: isValidListingUUID ? listingId : undefined,
+      }
+    );
+
+    // 5. Revalidate admin views
     revalidatePath("/admin");
     revalidatePath("/admin/reports");
     revalidatePath("/admin/listings");
+
     return { success: true };
   } catch (err: unknown) {
     return { error: (err as Error).message || "Failed to dismiss report" };

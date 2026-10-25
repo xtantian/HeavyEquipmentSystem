@@ -1,5 +1,10 @@
 import "server-only";
-import { createSupabaseServerClient, getSupabaseUrl, getSupabasePublishableKey } from "./server";
+import {
+  createSupabaseServerClient,
+  createSupabaseServiceClient,
+  getSupabaseUrl,
+  getSupabasePublishableKey,
+} from "./server";
 import { createClient } from "@supabase/supabase-js";
 import type { Database } from "./types";
 
@@ -52,14 +57,26 @@ export async function getPublicListerProfile(
   listerId: string
 ): Promise<PublicListerProfile | null> {
   try {
-    const supabase = getPublicClient() || (await createSupabaseServerClient());
-    const { data, error } = await supabase
-      .from("profiles")
-      .select("clerk_user_id, first_name, last_name, avatar_url, role, created_at")
-      .eq("clerk_user_id", listerId)
-      .maybeSingle();
+    let data = null;
+    try {
+      const serviceClient = createSupabaseServiceClient();
+      const { data: svcProfile } = await serviceClient
+        .from("profiles")
+        .select("clerk_user_id, first_name, last_name, avatar_url, role, created_at")
+        .eq("clerk_user_id", listerId)
+        .maybeSingle();
+      data = svcProfile;
+    } catch {
+      const supabase = getPublicClient() || (await createSupabaseServerClient());
+      const { data: userProfile } = await supabase
+        .from("profiles")
+        .select("clerk_user_id, first_name, last_name, avatar_url, role, created_at")
+        .eq("clerk_user_id", listerId)
+        .maybeSingle();
+      data = userProfile;
+    }
 
-    if (error || !data) {
+    if (!data) {
       return null;
     }
 
@@ -141,10 +158,21 @@ export async function getListerReviews(
 
     // Resolve reviewer profiles
     const reviewerIds = Array.from(new Set(reviewsData.map((r) => r.reviewer_id)));
-    const { data: profilesData } = await supabase
-      .from("profiles")
-      .select("clerk_user_id, first_name, last_name, avatar_url")
-      .in("clerk_user_id", reviewerIds);
+    let profilesData: Array<{ clerk_user_id: string; first_name: string | null; last_name: string | null; avatar_url: string | null }> | null = null;
+    try {
+      const serviceClient = createSupabaseServiceClient();
+      const { data: svcProfiles } = await serviceClient
+        .from("profiles")
+        .select("clerk_user_id, first_name, last_name, avatar_url")
+        .in("clerk_user_id", reviewerIds);
+      profilesData = svcProfiles;
+    } catch {
+      const { data: userProfiles } = await supabase
+        .from("profiles")
+        .select("clerk_user_id, first_name, last_name, avatar_url")
+        .in("clerk_user_id", reviewerIds);
+      profilesData = userProfiles;
+    }
 
     const profileMap = new Map<string, { name: string; avatar_url: string | null }>();
     if (profilesData) {

@@ -13,7 +13,6 @@ import {
   Loader2,
   ArrowRight,
   ShieldCheck,
-  Plus,
   Sparkles,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -89,7 +88,7 @@ export function NewListingForm({ categories, userId }: NewListingFormProps) {
   // Image Uploads State
   // [STATE] Array of staged equipment images with previews.
   const [images, setImages] = React.useState<ImageUploadItem[]>([]);
-  const [externalImageUrl, setExternalImageUrl] = React.useState("");
+  const [uploadProgress, setUploadProgress] = React.useState<string | null>(null);
 
   // Submission State
   // [STATE] Loading state during upload and database submission.
@@ -177,22 +176,8 @@ export function NewListingForm({ categories, userId }: NewListingFormProps) {
     }));
 
     setImages((prev) => [...prev, ...newUploads]);
+    setSubmitError(null);
     e.target.value = "";
-  };
-
-  // Add external image URL
-  const handleAddExternalImage = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!externalImageUrl.trim()) return;
-
-    const newItem: ImageUploadItem = {
-      id: `ext_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-      previewUrl: externalImageUrl.trim(),
-      isPrimary: images.length === 0,
-    };
-
-    setImages((prev) => [...prev, newItem]);
-    setExternalImageUrl("");
   };
 
   // Remove image
@@ -263,7 +248,20 @@ export function NewListingForm({ categories, userId }: NewListingFormProps) {
       }
     }
 
+    // Require at least one photo before submitting
+    if (images.length === 0) {
+      setSubmitError("Please upload at least one equipment photo before submitting your listing.");
+      return;
+    }
+
+    // Require authenticated session before proceeding with storage upload
+    if (!userId) {
+      setSubmitError("You must be signed in to create an equipment listing. Please refresh and sign in.");
+      return;
+    }
+
     setIsSubmitting(true);
+    setUploadProgress("Preparing upload...");
 
     try {
       const supabase = createSupabaseBrowserClient(getToken);
@@ -278,18 +276,23 @@ export function NewListingForm({ categories, userId }: NewListingFormProps) {
       if (userProfile?.status === "restricted") {
         setSubmitError("Your account is currently restricted from creating new listings. Please contact administration.");
         setIsSubmitting(false);
+        setUploadProgress(null);
         return;
       }
       if (userProfile?.status === "banned" || userProfile?.status === "deleted") {
         setSubmitError("Your account is suspended and cannot post listings.");
         setIsSubmitting(false);
+        setUploadProgress(null);
         return;
       }
 
       // 1. Upload files to Supabase Storage bucket 'listing-images'
       const uploadedImageUrls: string[] = [];
 
-      for (const item of images) {
+      for (let i = 0; i < images.length; i++) {
+        const item = images[i];
+        setUploadProgress(`Uploading photo ${i + 1} of ${images.length}...`);
+
         if (item.file) {
           try {
             const fileExt = item.file.name.split(".").pop() || "jpg";
@@ -298,36 +301,47 @@ export function NewListingForm({ categories, userId }: NewListingFormProps) {
             let fileUploadSucceeded = false;
             let filePublicUrl = "";
 
-            // Attempt 1: Upload with primary client
-            let { data: uploadData, error: uploadError } = await supabase.storage
+            // Upload strictly with authenticated Supabase client
+            const { data: uploadData, error: uploadError } = await supabase.storage
               .from("listing-images")
               .upload(filePath, item.file, {
                 contentType: item.file.type || "image/jpeg",
                 upsert: true,
               });
 
-            // If JWT/Auth rejected, retry with public anon client
-            const errObj = uploadError as unknown as { statusCode?: string | number; status?: number };
-            if (
-              uploadError &&
-              (uploadError.message?.toLowerCase().includes("jwt") ||
+            if (uploadError) {
+              const errObj = uploadError as unknown as { statusCode?: string | number; status?: number };
+              const isAuthError =
+                uploadError.message?.toLowerCase().includes("jwt") ||
                 uploadError.message?.toLowerCase().includes("auth") ||
+                uploadError.message?.toLowerCase().includes("token") ||
+                uploadError.message?.toLowerCase().includes("unauthorized") ||
+                uploadError.message?.toLowerCase().includes("row-level security") ||
+                uploadError.message?.toLowerCase().includes("policy") ||
                 errObj.status === 401 ||
+                errObj.status === 403 ||
                 errObj.statusCode === 401 ||
-                errObj.statusCode === "401")
-            ) {
-              const publicClient = createSupabaseBrowserClient(null);
-              const retryUpload = await publicClient.storage
-                .from("listing-images")
-                .upload(filePath, item.file, {
-                  contentType: item.file.type || "image/jpeg",
-                  upsert: true,
-                });
-              uploadData = retryUpload.data;
-              uploadError = retryUpload.error;
+                errObj.statusCode === 403 ||
+                errObj.statusCode === "401" ||
+                errObj.statusCode === "403";
+
+              console.error("[storage] Photo upload failed for file:", item.file.name, uploadError.message);
+
+              const failureMsg = isAuthError
+                ? `Authentication failed during upload for "${item.file.name}". Your session may have expired or Supabase storage authentication requires verification. Please refresh and sign in again.`
+                : uploadError.message?.toLowerCase().includes("bucket") ||
+                  uploadError.message?.toLowerCase().includes("not found") ||
+                  errObj.statusCode === 404
+                ? `Failed to upload "${item.file.name}": Storage bucket "listing-images" is not provisioned in Supabase. Please verify the storage bucket configuration.`
+                : `Failed to upload "${item.file.name}". ${uploadError.message}`;
+
+              setSubmitError(failureMsg);
+              setIsSubmitting(false);
+              setUploadProgress(null);
+              return;
             }
 
-            if (!uploadError && uploadData) {
+            if (uploadData) {
               const { data: publicUrlData } = supabase.storage
                 .from("listing-images")
                 .getPublicUrl(filePath);
@@ -336,24 +350,14 @@ export function NewListingForm({ categories, userId }: NewListingFormProps) {
                 filePublicUrl = publicUrlData.publicUrl;
                 fileUploadSucceeded = true;
               }
-            } else if (uploadError) {
-              console.warn("[storage] Image upload failed:", uploadError.message);
             }
 
             if (fileUploadSucceeded && filePublicUrl) {
               uploadedImageUrls.push(filePublicUrl);
             } else {
-              const failureMsg = uploadError?.message || "Storage service error.";
-              console.error("[storage] Photo upload failed for file:", item.file.name, failureMsg);
-              const isBucketNotFound =
-                failureMsg.toLowerCase().includes("bucket") ||
-                failureMsg.toLowerCase().includes("not found") ||
-                (uploadError as unknown as { statusCode?: number })?.statusCode === 404;
-              const descriptiveError = isBucketNotFound
-                ? `Failed to upload "${item.file.name}": Storage bucket "listing-images" is not provisioned in Supabase. Please configure the bucket or use an external image URL.`
-                : `Failed to upload "${item.file.name}". ${failureMsg}`;
-              setSubmitError(descriptiveError);
+              setSubmitError(`Failed to retrieve public URL for uploaded photo "${item.file.name}".`);
               setIsSubmitting(false);
+              setUploadProgress(null);
               return;
             }
           } catch (storageErr) {
@@ -361,18 +365,21 @@ export function NewListingForm({ categories, userId }: NewListingFormProps) {
             const failureMsg = storageErr instanceof Error ? storageErr.message : "Network error during upload.";
             setSubmitError(`Failed to upload photo "${item.file.name}". ${failureMsg}`);
             setIsSubmitting(false);
+            setUploadProgress(null);
             return;
           }
-        } else if (item.previewUrl && !item.previewUrl.startsWith("blob:")) {
-          // Direct external URL
-          uploadedImageUrls.push(item.previewUrl);
         }
       }
 
-      // If no images were provided, use fallback placeholder
+      // Enforce at least one photo successfully uploaded
       if (uploadedImageUrls.length === 0) {
-        uploadedImageUrls.push("/images/equipment_loader.jpg");
+        setSubmitError("Please upload at least one equipment photo before submitting your listing.");
+        setIsSubmitting(false);
+        setUploadProgress(null);
+        return;
       }
+
+      setUploadProgress("Submitting listing for review...");
 
       // Compile attributes payload
       const finalAttributes: Record<string, unknown> = {
@@ -392,6 +399,8 @@ export function NewListingForm({ categories, userId }: NewListingFormProps) {
         attributes: finalAttributes,
         assetIdentifier: assetIdentifier.trim() || undefined,
       });
+
+      setUploadProgress(null);
 
       if (!result.success || !result.listingId) {
         setSubmitError(result.error || "Failed to publish listing. No listing ID was returned.");
@@ -804,25 +813,13 @@ export function NewListingForm({ categories, userId }: NewListingFormProps) {
           />
         </label>
 
-        {/* Optional Add Image URL */}
-        <div className="mt-4 flex gap-2">
-          <Input
-            type="url"
-            value={externalImageUrl}
-            onChange={(e) => setExternalImageUrl(e.target.value)}
-            placeholder="Or paste an image web link (e.g. Unsplash URL)..."
-            className="h-10 rounded-xl text-xs sm:text-sm"
-          />
-          <Button
-            type="button"
-            variant="outline"
-            onClick={handleAddExternalImage}
-            className="shrink-0 text-xs font-semibold rounded-xl"
-          >
-            <Plus className="mr-1 h-3.5 w-3.5" />
-            Add URL
-          </Button>
-        </div>
+        {/* Validation Notice when no photos are selected */}
+        {images.length === 0 && (
+          <div className="mt-4 flex items-center gap-2 rounded-xl bg-amber-500/10 border border-amber-500/20 px-3.5 py-2.5 text-xs text-amber-600 dark:text-amber-400">
+            <AlertCircle className="h-4 w-4 shrink-0" />
+            <span>Please upload at least one equipment photo before submitting your listing.</span>
+          </div>
+        )}
 
         {/* Previews Grid */}
         {images.length > 0 && (
@@ -908,13 +905,13 @@ export function NewListingForm({ categories, userId }: NewListingFormProps) {
         <Button
           type="submit"
           size="lg"
-          disabled={isSubmitting}
-          className="w-full sm:w-auto h-12 px-8 font-bold shadow-lg shadow-primary/20 text-sm sm:text-base rounded-xl cursor-pointer"
+          disabled={isSubmitting || images.length === 0}
+          className="w-full sm:w-auto h-12 px-8 font-bold shadow-lg shadow-primary/20 text-sm sm:text-base rounded-xl cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
         >
           {isSubmitting ? (
             <>
               <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-              Submitting Listing...
+              {uploadProgress || "Submitting Listing..."}
             </>
           ) : (
             <>

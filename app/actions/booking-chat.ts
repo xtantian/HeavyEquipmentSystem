@@ -1,7 +1,7 @@
 "use server";
 
 import { auth } from "@clerk/nextjs/server";
-import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { createSupabaseServerClient, createSupabaseServiceClient } from "@/lib/supabase/server";
 
 export interface BookingMessage {
   id: string;
@@ -26,6 +26,10 @@ export interface GetConversationResult {
   messages?: BookingMessage[];
   otherParticipantId?: string;
   otherParticipantName?: string;
+  bookingStatus?: string;
+  isRenter?: boolean;
+  isOwner?: boolean;
+  hasReviewed?: boolean;
   error?: string;
   code?: string;
 }
@@ -102,11 +106,23 @@ export async function getBookingConversationAction(
       conversation.renter_id === userId ? "Equipment Host" : "Verified Renter";
 
     if (otherParticipantId) {
-      const { data: otherProfile } = await supabase
-        .from("profiles")
-        .select("first_name, last_name")
-        .eq("clerk_user_id", otherParticipantId)
-        .maybeSingle();
+      let otherProfile = null;
+      try {
+        const serviceClient = createSupabaseServiceClient();
+        const { data: svcProfile } = await serviceClient
+          .from("profiles")
+          .select("first_name, last_name")
+          .eq("clerk_user_id", otherParticipantId)
+          .maybeSingle();
+        otherProfile = svcProfile;
+      } catch {
+        const { data: userProfile } = await supabase
+          .from("profiles")
+          .select("first_name, last_name")
+          .eq("clerk_user_id", otherParticipantId)
+          .maybeSingle();
+        otherProfile = userProfile;
+      }
 
       if (otherProfile) {
         const full = [otherProfile.first_name, otherProfile.last_name]
@@ -117,7 +133,29 @@ export async function getBookingConversationAction(
       }
     }
 
-    // 3. Fetch messages in chronological order
+    // 3. Fetch booking status and review state
+    const { data: bookingData } = await supabase
+      .from("bookings")
+      .select("status")
+      .eq("id", bookingId)
+      .maybeSingle();
+
+    const bookingStatus = bookingData?.status || "accepted";
+    const isRenter = conversation.renter_id === userId;
+    const isOwner = conversation.owner_id === userId;
+
+    let hasReviewed = false;
+    if (isRenter && (bookingStatus === "completed" || bookingStatus === "returned")) {
+      const { data: rev } = await supabase
+        .from("lister_reviews")
+        .select("id")
+        .eq("booking_id", bookingId)
+        .eq("reviewer_id", userId)
+        .maybeSingle();
+      if (rev) hasReviewed = true;
+    }
+
+    // 4. Fetch messages in chronological order
     const { data: messagesData, error: messagesError } = await supabase
       .from("messages")
       .select("id, conversation_id, sender_id, content, read_at, created_at")
@@ -132,6 +170,10 @@ export async function getBookingConversationAction(
         messages: [],
         otherParticipantId,
         otherParticipantName,
+        bookingStatus,
+        isRenter,
+        isOwner,
+        hasReviewed,
       };
     }
 
@@ -141,6 +183,10 @@ export async function getBookingConversationAction(
       messages: (messagesData || []) as BookingMessage[],
       otherParticipantId,
       otherParticipantName,
+      bookingStatus,
+      isRenter,
+      isOwner,
+      hasReviewed,
     };
   } catch (err: unknown) {
     console.error("[getBookingConversationAction] Unexpected exception:", err);

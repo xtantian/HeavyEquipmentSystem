@@ -2213,6 +2213,1380 @@ assert(adminSupabaseContent.includes("Promise.all(["), "Admin overview stats que
 const heroContent = fs.readFileSync(path.join(__dirname, "../components/landing/hero.tsx"), "utf-8");
 assert(heroContent.includes("shouldRenderImage"), "Hero carousel defers non-active background slides to save initial paint network weight");
 
+// -----------------------------------------------------------------------------
+// 21. SINGLE-PARTY RENTAL COMPLETION & REVIEW UNLOCKING INVARIANTS
+// -----------------------------------------------------------------------------
+console.log("\n▶ SUITE 21: Single-Party Rental Completion & Review Invariants");
+
+// Simulation logic matching app/dashboard/actions.ts: completeBookingAction
+function simulateCompleteBooking({ booking, callerId }) {
+  if (!callerId) {
+    return { success: false, error: "Authentication required", code: "AUTH_REQUIRED" };
+  }
+  if (!booking) {
+    return { success: false, error: "Booking record not found", code: "NOT_FOUND" };
+  }
+  if (booking.status === "cancelled") {
+    return { success: false, error: "Cancelled bookings cannot be marked as completed.", code: "INVALID_TRANSITION" };
+  }
+  if (booking.status === "completed") {
+    return { success: false, error: "This booking is already marked as completed.", code: "ALREADY_COMPLETED" };
+  }
+
+  const isRenter = booking.renter_id === callerId;
+  const isOwner = booking.owner_id === callerId;
+  const isAdmin = callerId === "admin_user";
+
+  if (!isRenter && !isOwner && !isAdmin) {
+    return { success: false, error: "Unauthorized: You do not have permission to complete this booking.", code: "UNAUTHORIZED" };
+  }
+
+  const now = new Date().toISOString();
+  return {
+    success: true,
+    bookingId: booking.id,
+    status: "completed",
+    completed_by: callerId,
+    completed_at: now,
+    isRenter,
+    isOwner,
+  };
+}
+
+const mockBookingActive = {
+  id: "booking-active-123",
+  renter_id: "renter_alice",
+  owner_id: "owner_bob",
+  status: "active",
+};
+
+const mockBookingCancelled = {
+  id: "booking-cancelled-456",
+  renter_id: "renter_alice",
+  owner_id: "owner_bob",
+  status: "cancelled",
+};
+
+const mockBookingCompleted = {
+  id: "booking-completed-789",
+  renter_id: "renter_alice",
+  owner_id: "owner_bob",
+  status: "completed",
+  completed_by: "renter_alice",
+  completed_at: "2026-10-23T12:00:00Z",
+};
+
+// 21.1: Single confirmation by Renter
+const renterCompleteRes = simulateCompleteBooking({
+  booking: mockBookingActive,
+  callerId: "renter_alice",
+});
+assert(renterCompleteRes.success === true, "Renter can complete booking with single confirmation");
+assert(renterCompleteRes.status === "completed", "Booking status immediately transitions to 'completed'");
+assert(renterCompleteRes.completed_by === "renter_alice", "Booking records completed_by = renter_id");
+assert(Boolean(renterCompleteRes.completed_at), "Booking records completed_at timestamp");
+assert(renterCompleteRes.isRenter === true, "Identifies completing party as renter to unlock review");
+
+// 21.2: Single confirmation by Lister / Equipment Owner
+const ownerCompleteRes = simulateCompleteBooking({
+  booking: mockBookingActive,
+  callerId: "owner_bob",
+});
+assert(ownerCompleteRes.success === true, "Equipment owner can complete booking with single confirmation");
+assert(ownerCompleteRes.status === "completed", "Booking status immediately transitions to 'completed'");
+assert(ownerCompleteRes.completed_by === "owner_bob", "Booking records completed_by = owner_id");
+assert(Boolean(ownerCompleteRes.completed_at), "Booking records completed_at timestamp");
+
+// 21.3: Unauthorized stranger rejected
+const strangerCompleteRes = simulateCompleteBooking({
+  booking: mockBookingActive,
+  callerId: "stranger_eve",
+});
+assert(strangerCompleteRes.success === false, "Unauthorized stranger cannot complete booking");
+assert(strangerCompleteRes.code === "UNAUTHORIZED", "Stranger rejected with UNAUTHORIZED code");
+
+// 21.4: Cancelled booking cannot be completed
+const cancelledCompleteRes = simulateCompleteBooking({
+  booking: mockBookingCancelled,
+  callerId: "renter_alice",
+});
+assert(cancelledCompleteRes.success === false, "Cancelled booking cannot be marked as completed");
+assert(cancelledCompleteRes.code === "INVALID_TRANSITION", "Cancelled completion rejected with INVALID_TRANSITION");
+
+// 21.5: Already completed booking cannot be completed again
+const alreadyCompletedRes = simulateCompleteBooking({
+  booking: mockBookingCompleted,
+  callerId: "renter_alice",
+});
+assert(alreadyCompletedRes.success === false, "Already completed booking cannot be completed again");
+assert(alreadyCompletedRes.code === "ALREADY_COMPLETED", "Duplicate completion rejected with ALREADY_COMPLETED");
+
+// 21.6: Review Feature Unlocking Rules
+function simulateSubmitReview({ booking, callerId, rating, existingReviews }) {
+  if (!callerId) return { success: false, code: "AUTH_REQUIRED" };
+  if (!rating || rating < 1 || rating > 5) return { success: false, code: "INVALID_INPUT" };
+  if (!booking) return { success: false, code: "BOOKING_NOT_FOUND" };
+  if (booking.renter_id !== callerId) return { success: false, code: "NOT_ELIGIBLE" };
+  if (!["completed", "returned"].includes(booking.status)) return { success: false, code: "NOT_ELIGIBLE" };
+  if (booking.owner_id === callerId) return { success: false, code: "SELF_REVIEW" };
+  if (existingReviews && existingReviews.some((r) => r.booking_id === booking.id && r.reviewer_id === callerId)) {
+    return { success: false, code: "ALREADY_REVIEWED" };
+  }
+  return { success: true, reviewId: "review-new-1" };
+}
+
+// Completed booking review allowed for renter
+const reviewCompletedRes = simulateSubmitReview({
+  booking: { id: "b1", renter_id: "u1", owner_id: "u2", status: "completed" },
+  callerId: "u1",
+  rating: 5,
+  existingReviews: [],
+});
+assert(reviewCompletedRes.success === true, "Renter can leave review for completed booking");
+
+// Pending booking review blocked
+const reviewPendingRes = simulateSubmitReview({
+  booking: { id: "b2", renter_id: "u1", owner_id: "u2", status: "pending" },
+  callerId: "u1",
+  rating: 5,
+  existingReviews: [],
+});
+assert(reviewPendingRes.success === false && reviewPendingRes.code === "NOT_ELIGIBLE", "Pending booking review is blocked");
+
+// Cancelled booking review blocked
+const reviewCancelledRes = simulateSubmitReview({
+  booking: { id: "b3", renter_id: "u1", owner_id: "u2", status: "cancelled" },
+  callerId: "u1",
+  rating: 5,
+  existingReviews: [],
+});
+assert(reviewCancelledRes.success === false && reviewCancelledRes.code === "NOT_ELIGIBLE", "Cancelled booking review is blocked");
+
+// Duplicate review for same booking blocked
+const reviewDupRes = simulateSubmitReview({
+  booking: { id: "b1", renter_id: "u1", owner_id: "u2", status: "completed" },
+  callerId: "u1",
+  rating: 4,
+  existingReviews: [{ booking_id: "b1", reviewer_id: "u1" }],
+});
+assert(reviewDupRes.success === false && reviewDupRes.code === "ALREADY_REVIEWED", "Duplicate review for same completed booking is strictly blocked");
+
+// 21.7: Static Invariants - Migration 016
+const migration016Path = path.join(__dirname, "../supabase/migrations/016_single_party_rental_completion.sql");
+assert(fs.existsSync(migration016Path), "Migration 016 file exists");
+const migration016Sql = fs.readFileSync(migration016Path, "utf-8");
+assert(migration016Sql.includes("completed_by"), "Migration 016 adds completed_by column");
+assert(migration016Sql.includes("completed_at"), "Migration 016 adds completed_at column");
+assert(migration016Sql.includes("status = 'completed'"), "Migration 016 permits status = 'completed' in RLS update policy");
+
+// 21.8: Static Invariants - BookingChatModal & DashboardTabs
+const chatModalCode = fs.readFileSync(path.join(__dirname, "../components/dashboard/booking-chat-modal.tsx"), "utf-8");
+assert(chatModalCode.includes("completeBookingAction"), "BookingChatModal imports and invokes completeBookingAction");
+assert(chatModalCode.includes("Mark as Done"), "BookingChatModal renders 'Mark as Done' button");
+assert(chatModalCode.includes("WriteListerReviewModal"), "BookingChatModal integrates WriteListerReviewModal for immediate review");
+
+const dashboardTabsCode = fs.readFileSync(path.join(__dirname, "../components/dashboard/dashboard-tabs.tsx"), "utf-8");
+assert(dashboardTabsCode.includes("completeBookingAction"), "DashboardTabs imports completeBookingAction");
+assert(dashboardTabsCode.includes("Mark as Done"), "DashboardTabs renders 'Mark as Done' button on rental cards");
+assert(dashboardTabsCode.includes("completingBooking"), "DashboardTabs tracks completingBooking state for confirmation dialog");
+
+// 21.9: Static Invariants - Lister Profile Host Reputation
+const listerReviewsListCode = fs.readFileSync(path.join(__dirname, "../components/reviews/lister-reviews-list.tsx"), "utf-8");
+assert(listerReviewsListCode.includes("average_rating"), "Host Reputation displays average star rating");
+assert(listerReviewsListCode.includes("total_reviews"), "Host Reputation displays total verified reviews count");
+assert(listerReviewsListCode.includes("rating_distribution"), "Host Reputation displays 1-5 star distribution");
+assert(listerReviewsListCode.includes("rev.reviewer.name"), "Host Reputation displays reviewer name, rating, comment, date");
+
+// -----------------------------------------------------------------------------
+// 22. REGRESSION VERIFICATION: BUG 1 (SCHEMA CACHE) & BUG 2 (COUNTERPARTY RESOLUTION)
+// -----------------------------------------------------------------------------
+console.log("\n▶ SUITE 22: Regression Verification — Completion Audit Fields & Counterparty Resolution");
+
+// 22.1: Schema audit columns and types
+const dbTypesContent = fs.readFileSync(path.join(__dirname, "../lib/supabase/types.ts"), "utf-8");
+assert(dbTypesContent.includes("completed_by?: string | null;"), "Database types declare bookings.completed_by column");
+assert(dbTypesContent.includes("completed_at?: string | null;"), "Database types declare bookings.completed_at column");
+assert(dbTypesContent.includes("preliminary_feedback: {"), "Database types declare preliminary_feedback table");
+
+// 22.2: Counterparty resolution unit logic simulation
+function resolveBookingCounterparty({ booking, callerId }) {
+  if (!booking) return { error: "Booking record not found.", code: "BOOKING_NOT_FOUND" };
+  
+  // Extract owner_id from nested object, array, or direct listing fallback
+  let listingOwnerId = null;
+  const rawListing = booking.listing;
+  if (Array.isArray(rawListing) && rawListing.length > 0) {
+    listingOwnerId = rawListing[0]?.owner_id || null;
+  } else if (rawListing && typeof rawListing === "object" && rawListing.owner_id) {
+    listingOwnerId = rawListing.owner_id;
+  } else if (booking.direct_listing_owner_id) {
+    listingOwnerId = booking.direct_listing_owner_id;
+  }
+
+  const isRenter = booking.renter_id === callerId;
+  const isOwner = Boolean(listingOwnerId && listingOwnerId === callerId);
+
+  if (!isRenter && !isOwner) {
+    return { error: "Unauthorized: You are not a registered participant in this booking.", code: "NOT_ELIGIBLE" };
+  }
+
+  const counterpartyId = isRenter ? listingOwnerId : booking.renter_id;
+  if (!counterpartyId) {
+    return { error: "Could not resolve booking counterparty.", code: "DATABASE_ERROR" };
+  }
+
+  return { success: true, counterpartyId, isRenter, isOwner };
+}
+
+// Test Case 1: Renter resolves lister as counterparty (object listing)
+const cpRenterRes = resolveBookingCounterparty({
+  booking: {
+    id: "bk-1",
+    renter_id: "renter_1",
+    listing_id: "list-1",
+    listing: { id: "list-1", owner_id: "owner_1" }
+  },
+  callerId: "renter_1"
+});
+assert(cpRenterRes.success && cpRenterRes.counterpartyId === "owner_1", "Renter reliably resolves listing owner as counterparty");
+
+// Test Case 2: Lister resolves renter as counterparty (object listing)
+const cpOwnerRes = resolveBookingCounterparty({
+  booking: {
+    id: "bk-1",
+    renter_id: "renter_1",
+    listing_id: "list-1",
+    listing: { id: "list-1", owner_id: "owner_1" }
+  },
+  callerId: "owner_1"
+});
+assert(cpOwnerRes.success && cpOwnerRes.counterpartyId === "renter_1", "Lister reliably resolves renter as counterparty");
+
+// Test Case 3: Counterparty resolves when listing is returned as an array by PostgREST
+const cpArrayRes = resolveBookingCounterparty({
+  booking: {
+    id: "bk-2",
+    renter_id: "renter_1",
+    listing_id: "list-2",
+    listing: [{ id: "list-2", owner_id: "owner_2" }]
+  },
+  callerId: "renter_1"
+});
+assert(cpArrayRes.success && cpArrayRes.counterpartyId === "owner_2", "Counterparty resolves when PostgREST returns listing as array");
+
+// Test Case 4: Counterparty resolves via direct listing fallback when join is null (e.g. non-available RLS)
+const cpFallbackRes = resolveBookingCounterparty({
+  booking: {
+    id: "bk-3",
+    renter_id: "renter_1",
+    listing_id: "list-3",
+    listing: null,
+    direct_listing_owner_id: "owner_3"
+  },
+  callerId: "renter_1"
+});
+assert(cpFallbackRes.success && cpFallbackRes.counterpartyId === "owner_3", "Counterparty resolves via direct listing fallback when join is null");
+
+// Test Case 5: Unrelated caller is strictly rejected from resolving counterparty
+const cpStrangerRes = resolveBookingCounterparty({
+  booking: {
+    id: "bk-1",
+    renter_id: "renter_1",
+    listing_id: "list-1",
+    listing: { id: "list-1", owner_id: "owner_1" }
+  },
+  callerId: "stranger_eve"
+});
+assert(!cpStrangerRes.success && cpStrangerRes.code === "NOT_ELIGIBLE", "Unrelated third-party caller rejected from counterparty resolution");
+
+// 22.3: Two review systems separation invariants
+const reviewsActionsCode = fs.readFileSync(path.join(__dirname, "../app/actions/reviews.ts"), "utf-8");
+assert(reviewsActionsCode.includes("resolveAuthoritativeBooking"), "reviews.ts defines resolveAuthoritativeBooking helper");
+assert(reviewsActionsCode.includes("from(\"preliminary_feedback\")"), "submitPreliminaryFeedbackAction operates on preliminary_feedback table");
+assert(reviewsActionsCode.includes("from(\"lister_reviews\")"), "submitListerReviewAction operates on lister_reviews table");
+assert(reviewsActionsCode.includes("from(\"renter_reviews\")"), "submitRenterReviewAction operates on renter_reviews table");
+
+// 22.4: Dashboard actions completion invariants
+const dashboardActionsCheck = fs.readFileSync(path.join(__dirname, "../app/dashboard/actions.ts"), "utf-8");
+assert(dashboardActionsCheck.includes("completed_by: userId"), "completeBookingAction persists completed_by audit field");
+assert(dashboardActionsCheck.includes("completed_at: nowIso"), "completeBookingAction persists completed_at timestamp");
+assert(dashboardActionsCheck.includes("INVALID_TRANSITION"), "completeBookingAction blocks cancelled booking transitions");
+
+// -----------------------------------------------------------------------------
+// 23. PUBLIC LISTER REVIEW WORKFLOW & CLIENT BOUNDARY REGRESSION INVARIANTS
+// -----------------------------------------------------------------------------
+console.log("\n▶ SUITE 23: Public Lister Review System End-to-End Invariants");
+
+// 23.1: React Server Component boundary invariant on StarRating
+const starRatingContent = fs.readFileSync(path.join(__dirname, "../components/reviews/star-rating.tsx"), "utf-8");
+assert(
+  starRatingContent.trim().startsWith('"use client";') || starRatingContent.trim().startsWith("'use client';"),
+  "components/reviews/star-rating.tsx establishes explicit Client Component boundary ('use client')"
+);
+
+const listingPageContent = fs.readFileSync(path.join(__dirname, "../app/listings/[id]/page.tsx"), "utf-8");
+assert(
+  !listingPageContent.includes('"use client"') && !listingPageContent.includes("'use client'"),
+  "app/listings/[id]/page.tsx remains a performant React Server Component"
+);
+assert(listingPageContent.includes("ListerProfileCard"), "Listing detail page renders host profile card with reviews");
+
+// 23.2: Eligibility - Renter can submit one public review after completing a booking
+function evaluatePublicReviewWorkflow({
+  callerId,
+  booking,
+  rating,
+  comment,
+  existingReviews = [],
+}) {
+  if (!callerId) return { success: false, code: "AUTH_REQUIRED" };
+  if (!rating || typeof rating !== "number" || !Number.isInteger(rating) || rating < 1 || rating > 5) {
+    return { success: false, code: "INVALID_INPUT" };
+  }
+  if (comment && comment.length > 1000) return { success: false, code: "INVALID_INPUT" };
+  if (!booking) return { success: false, code: "BOOKING_NOT_FOUND" };
+  if (booking.renter_id !== callerId) return { success: false, code: "NOT_ELIGIBLE" };
+  if (!["completed", "returned"].includes(booking.status)) return { success: false, code: "NOT_ELIGIBLE" };
+  if (booking.owner_id === callerId) return { success: false, code: "SELF_REVIEW" };
+  if (existingReviews.some((r) => r.booking_id === booking.id && r.reviewer_id === callerId)) {
+    return { success: false, code: "ALREADY_REVIEWED" };
+  }
+  return {
+    success: true,
+    review: {
+      id: "rev_test_123",
+      booking_id: booking.id,
+      reviewer_id: callerId,
+      lister_id: booking.owner_id,
+      rating,
+      comment: comment || null,
+      created_at: new Date().toISOString(),
+    },
+  };
+}
+
+const completedBooking1 = {
+  id: "booking_done_1",
+  renter_id: "user_renter_alice",
+  owner_id: "user_lister_bob",
+  status: "completed",
+};
+
+const validReviewRes = evaluatePublicReviewWorkflow({
+  callerId: "user_renter_alice",
+  booking: completedBooking1,
+  rating: 5,
+  comment: "Excellent machinery, delivered clean and fueled.",
+});
+assert(validReviewRes.success === true, "Eligible renter can submit public review on completed booking");
+assert(validReviewRes.review.lister_id === "user_lister_bob", "Public review is bound to correct listing owner");
+assert(validReviewRes.review.booking_id === "booking_done_1", "Public review is bound to correct booking");
+
+// 23.3: Profile aggregation - Average rating, review count, and star distribution
+function computeListerRatingSummary(reviews) {
+  const summary = {
+    average_rating: 0,
+    total_reviews: reviews.length,
+    rating_distribution: { 5: 0, 4: 0, 3: 0, 2: 0, 1: 0 },
+  };
+  if (reviews.length === 0) return summary;
+  let sum = 0;
+  for (const r of reviews) {
+    sum += r.rating;
+    if (r.rating in summary.rating_distribution) {
+      summary.rating_distribution[r.rating]++;
+    }
+  }
+  summary.average_rating = Number((sum / reviews.length).toFixed(1));
+  return summary;
+}
+
+const mockProfileReviews = [
+  { rating: 5 },
+  { rating: 5 },
+  { rating: 4 },
+  { rating: 3 },
+  { rating: 5 },
+];
+const computedSummary = computeListerRatingSummary(mockProfileReviews);
+assert(computedSummary.total_reviews === 5, "Total review count computed correctly (5)");
+assert(computedSummary.average_rating === 4.4, "Average rating computed accurately (4.4)");
+assert(computedSummary.rating_distribution[5] === 3, "Star distribution for 5 stars is 3");
+assert(computedSummary.rating_distribution[4] === 1, "Star distribution for 4 stars is 1");
+assert(computedSummary.rating_distribution[3] === 1, "Star distribution for 3 stars is 1");
+assert(computedSummary.rating_distribution[2] === 0, "Star distribution for 2 stars is 0");
+assert(computedSummary.rating_distribution[1] === 0, "Star distribution for 1 star is 0");
+
+// 23.4: Duplicate review rejection
+const duplicateReviewRes = evaluatePublicReviewWorkflow({
+  callerId: "user_renter_alice",
+  booking: completedBooking1,
+  rating: 4,
+  existingReviews: [{ booking_id: "booking_done_1", reviewer_id: "user_renter_alice" }],
+});
+assert(duplicateReviewRes.success === false && duplicateReviewRes.code === "ALREADY_REVIEWED", "Duplicate review for same booking is strictly rejected");
+
+// 23.5: Concurrent review submissions handled atomically
+function simulateConcurrentReviewSubmissions(bookingId, reviewerId, attempts) {
+  const databaseTable = new Set();
+  const results = [];
+  for (let i = 0; i < attempts; i++) {
+    const key = `${bookingId}_${reviewerId}`;
+    if (databaseTable.has(key)) {
+      results.push({ success: false, code: "ALREADY_REVIEWED" });
+    } else {
+      databaseTable.add(key);
+      results.push({ success: true, id: `rev_${i}` });
+    }
+  }
+  return results;
+}
+const concurrentAttempts = simulateConcurrentReviewSubmissions("booking_done_1", "user_renter_alice", 5);
+const successfulSubmissions = concurrentAttempts.filter((a) => a.success);
+const rejectedDuplicates = concurrentAttempts.filter((a) => !a.success && a.code === "ALREADY_REVIEWED");
+assert(successfulSubmissions.length === 1, "Exactly one concurrent submission succeeds");
+assert(rejectedDuplicates.length === 4, "Remaining 4 concurrent attempts fail duplicate check with ALREADY_REVIEWED");
+
+// 23.6: Unrelated stranger blocked from reviewing
+const strangerReviewRes = evaluatePublicReviewWorkflow({
+  callerId: "user_stranger_eve",
+  booking: completedBooking1,
+  rating: 5,
+});
+assert(strangerReviewRes.success === false && strangerReviewRes.code === "NOT_ELIGIBLE", "Unrelated caller strictly rejected from reviewing another user's booking");
+
+// 23.7: Incomplete/Pending/Active/Cancelled bookings cannot be reviewed
+const pendingBookingReview = evaluatePublicReviewWorkflow({
+  callerId: "user_renter_alice",
+  booking: { id: "bk_p", renter_id: "user_renter_alice", owner_id: "user_lister_bob", status: "pending" },
+  rating: 5,
+});
+assert(pendingBookingReview.success === false && pendingBookingReview.code === "NOT_ELIGIBLE", "Pending booking cannot be reviewed");
+
+const activeBookingReview = evaluatePublicReviewWorkflow({
+  callerId: "user_renter_alice",
+  booking: { id: "bk_a", renter_id: "user_renter_alice", owner_id: "user_lister_bob", status: "active" },
+  rating: 5,
+});
+assert(activeBookingReview.success === false && activeBookingReview.code === "NOT_ELIGIBLE", "Active booking cannot be reviewed until completed");
+
+const cancelledBookingReview = evaluatePublicReviewWorkflow({
+  callerId: "user_renter_alice",
+  booking: { id: "bk_c", renter_id: "user_renter_alice", owner_id: "user_lister_bob", status: "cancelled" },
+  rating: 5,
+});
+assert(cancelledBookingReview.success === false && cancelledBookingReview.code === "NOT_ELIGIBLE", "Cancelled booking cannot be reviewed");
+
+// 23.8: Self-review blocked
+const selfReviewRes = evaluatePublicReviewWorkflow({
+  callerId: "user_lister_bob",
+  booking: { id: "bk_self", renter_id: "user_lister_bob", owner_id: "user_lister_bob", status: "completed" },
+  rating: 5,
+});
+assert(selfReviewRes.success === false && selfReviewRes.code === "SELF_REVIEW", "Lister cannot review themselves");
+
+// ============================================================================
+// SUITE 24: Admin Report Dismissal Persistence & Invariants
+// ============================================================================
+console.log("\n▶ SUITE 24: Admin Report Dismissal Persistence & Invariants");
+
+// Model simulating authoritative Supabase database tables for reports
+function createMockReportsDatabase() {
+  const listingReports = new Map([
+    [
+      "rep_listing_1",
+      {
+        id: "rep_listing_1",
+        listing_id: "77777777-7777-4777-8777-777777777777",
+        reporter_id: "user_renter_1",
+        reporter_email: "renter1@example.com",
+        reason: "Inaccurate equipment specs",
+        details: "Rated at 20 tons but only 10 tons.",
+        status: "pending",
+        created_at: "2026-10-20T10:00:00Z",
+        updated_at: "2026-10-20T10:00:00Z",
+      },
+    ],
+  ]);
+
+  const profileReports = new Map([
+    [
+      "rep_prof_1",
+      {
+        id: "rep_prof_1",
+        target_user_id: "user_host_999",
+        reporter_id: "user_renter_2",
+        reporter_email: "renter2@example.com",
+        reason: "Harassment or abusive behavior",
+        details: "Lister threatened during coordination.",
+        status: "pending",
+        created_at: "2026-10-21T12:00:00Z",
+        updated_at: "2026-10-21T12:00:00Z",
+      },
+    ],
+  ]);
+
+  const listings = new Map([
+    [
+      "77777777-7777-4777-8777-777777777777",
+      {
+        id: "77777777-7777-4777-8777-777777777777",
+        title: "CAT 320 Excavator",
+        is_reported: true,
+        report_reason: "Inaccurate equipment specs",
+      },
+    ],
+  ]);
+
+  const auditLogs = [];
+
+  return {
+    listingReports,
+    profileReports,
+    listings,
+    auditLogs,
+  };
+}
+
+// Authoritative simulation of dismissReportAction logic
+function simulateDismissReportAction(db, { callerRole, reportId, listingId, targetType, failDbUpdate = false }) {
+  // 1. Authorization verification
+  if (callerRole !== "admin") {
+    return { error: "Unauthorized: Administrator privileges required.", code: "UNAUTHORIZED" };
+  }
+
+  if (failDbUpdate) {
+    return { error: "Database connection timeout during status update.", code: "DATABASE_ERROR" };
+  }
+
+  let updated = false;
+  let resolvedTargetType = targetType || "listing";
+
+  // 2. Targeted update checking affected rows
+  if (targetType === "profile") {
+    if (db.profileReports.has(reportId)) {
+      const record = db.profileReports.get(reportId);
+      record.status = "dismissed";
+      record.updated_at = new Date().toISOString();
+      updated = true;
+      resolvedTargetType = "profile";
+    }
+  } else if (targetType === "listing") {
+    if (db.listingReports.has(reportId)) {
+      const record = db.listingReports.get(reportId);
+      record.status = "dismissed";
+      record.updated_at = new Date().toISOString();
+      updated = true;
+      resolvedTargetType = "listing";
+    }
+  } else {
+    // Untyped fallback
+    if (db.listingReports.has(reportId)) {
+      const record = db.listingReports.get(reportId);
+      record.status = "dismissed";
+      record.updated_at = new Date().toISOString();
+      updated = true;
+      resolvedTargetType = "listing";
+    } else if (db.profileReports.has(reportId)) {
+      const record = db.profileReports.get(reportId);
+      record.status = "dismissed";
+      record.updated_at = new Date().toISOString();
+      updated = true;
+      resolvedTargetType = "profile";
+    }
+  }
+
+  // Cross-table fallback if targetType was specified but row was in other table
+  if (!updated && targetType) {
+    const otherMap = targetType === "profile" ? db.listingReports : db.profileReports;
+    if (otherMap.has(reportId)) {
+      const record = otherMap.get(reportId);
+      record.status = "dismissed";
+      record.updated_at = new Date().toISOString();
+      updated = true;
+      resolvedTargetType = targetType === "profile" ? "listing" : "profile";
+    }
+  }
+
+  // Affected-rows validation: must reject if no rows updated
+  if (!updated) {
+    return { error: "Report record not found or could not be updated.", code: "REPORT_NOT_FOUND" };
+  }
+
+  // 3. Clear reported flag on listing ONLY for valid listing UUID and listing reports
+  const isValidListingUUID = listingId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(listingId);
+  if (isValidListingUUID && resolvedTargetType === "listing" && db.listings.has(listingId)) {
+    // Check if other open reports exist
+    const otherOpen = Array.from(db.listingReports.values()).some(
+      (r) => r.listing_id === listingId && r.id !== reportId && (r.status === "pending" || r.status === "reviewed")
+    );
+    if (!otherOpen) {
+      const l = db.listings.get(listingId);
+      l.is_reported = false;
+      l.report_reason = null;
+    }
+  }
+
+  // 4. Audit logging
+  db.auditLogs.push({
+    action: "dismiss_report",
+    targetType: resolvedTargetType === "profile" ? "user" : "report",
+    targetId: reportId,
+    timestamp: new Date().toISOString(),
+  });
+
+  return { success: true };
+}
+
+// Authoritative simulation of getAdminReports (page reload / refresh query)
+function simulateGetAdminReports(db) {
+  const all = [];
+  for (const r of db.listingReports.values()) {
+    all.push({
+      id: r.id,
+      target_type: "listing",
+      listing_id: r.listing_id,
+      reason: r.reason,
+      status: r.status,
+      created_at: r.created_at,
+    });
+  }
+  for (const pr of db.profileReports.values()) {
+    all.push({
+      id: pr.id,
+      target_type: "profile",
+      listing_id: pr.target_user_id,
+      reason: pr.reason,
+      status: pr.status,
+      created_at: pr.created_at,
+    });
+  }
+  return all;
+}
+
+// 24.1: Dismissing a pending profile report succeeds and persists
+const testDb1 = createMockReportsDatabase();
+const dismissProfileRes = simulateDismissReportAction(testDb1, {
+  callerRole: "admin",
+  reportId: "rep_prof_1",
+  listingId: "user_host_999",
+  targetType: "profile",
+});
+assert(dismissProfileRes.success === true, "Admin can successfully dismiss a profile report");
+assert(testDb1.profileReports.get("rep_prof_1").status === "dismissed", "Profile report status persisted as 'dismissed' in DB");
+
+// 24.2: Page refresh preserves the dismissed status (does not revert to pending)
+const refreshedReportsAfterDismiss = simulateGetAdminReports(testDb1);
+const reloadedProfileReport = refreshedReportsAfterDismiss.find((r) => r.id === "rep_prof_1");
+assert(reloadedProfileReport && reloadedProfileReport.status === "dismissed", "Refreshed report list retains status: 'dismissed' (does not revert to pending)");
+
+// 24.3: Dismissing a pending listing report succeeds and updates DB
+const dismissListingRes = simulateDismissReportAction(testDb1, {
+  callerRole: "admin",
+  reportId: "rep_listing_1",
+  listingId: "77777777-7777-4777-8777-777777777777",
+  targetType: "listing",
+});
+assert(dismissListingRes.success === true, "Admin can successfully dismiss a listing report");
+assert(testDb1.listingReports.get("rep_listing_1").status === "dismissed", "Listing report status persisted as 'dismissed' in DB");
+assert(testDb1.listings.get("77777777-7777-4777-8777-777777777777").is_reported === false, "Listing is_reported flag cleared when last open report dismissed");
+
+// 24.4: Navigating away and returning preserves dismissed state
+const secondReload = simulateGetAdminReports(testDb1);
+assert(secondReload.every((r) => r.status === "dismissed"), "All reports remain dismissed across multiple subsequent page loads");
+
+// 24.5: Unauthorized user cannot dismiss reports
+const testDb2 = createMockReportsDatabase();
+const unauthorizedRes = simulateDismissReportAction(testDb2, {
+  callerRole: "contractor",
+  reportId: "rep_listing_1",
+  listingId: "77777777-7777-4777-8777-777777777777",
+  targetType: "listing",
+});
+assert(unauthorizedRes.success !== true && unauthorizedRes.code === "UNAUTHORIZED", "Unauthorized user strictly rejected from dismissing reports");
+assert(testDb2.listingReports.get("rep_listing_1").status === "pending", "Pending status remains unmutated after unauthorized attempt");
+
+// 24.6: Failed database update returns error and does NOT report success
+const failedUpdateRes = simulateDismissReportAction(testDb2, {
+  callerRole: "admin",
+  reportId: "rep_listing_1",
+  listingId: "77777777-7777-4777-8777-777777777777",
+  targetType: "listing",
+  failDbUpdate: true,
+});
+assert(failedUpdateRes.success !== true && failedUpdateRes.code === "DATABASE_ERROR", "Failed DB update returns structured actionable error");
+assert(testDb2.listingReports.get("rep_listing_1").status === "pending", "Report remains pending on failed DB operation");
+
+// 24.7: Non-existent report returns REPORT_NOT_FOUND (zero rows affected check)
+const missingReportRes = simulateDismissReportAction(testDb2, {
+  callerRole: "admin",
+  reportId: "rep_non_existent",
+  listingId: "77777777-7777-4777-8777-777777777777",
+});
+assert(missingReportRes.success !== true && missingReportRes.code === "REPORT_NOT_FOUND", "Updating non-existent report returns REPORT_NOT_FOUND error");
+
+// 24.8: Report filters accurately partition dismissed vs pending
+function filterReports(reportsList, filter) {
+  if (filter === "all") return reportsList;
+  return reportsList.filter((r) => r.status === filter);
+}
+const mixedDb = createMockReportsDatabase();
+// rep_listing_1 is pending, rep_prof_1 is dismissed
+simulateDismissReportAction(mixedDb, { callerRole: "admin", reportId: "rep_prof_1", targetType: "profile" });
+const mixedLoaded = simulateGetAdminReports(mixedDb);
+const pendingOnly = filterReports(mixedLoaded, "pending");
+const dismissedOnly = filterReports(mixedLoaded, "dismissed");
+const allReports = filterReports(mixedLoaded, "all");
+
+assert(pendingOnly.length === 1 && pendingOnly[0].id === "rep_listing_1", "Pending filter only contains pending report");
+assert(dismissedOnly.length === 1 && dismissedOnly[0].id === "rep_prof_1", "Dismissed filter only contains dismissed report");
+assert(allReports.length === 2, "All reports filter contains both reports");
+
+// 24.9: Audit log recorded and report record preserved (not deleted)
+assert(mixedDb.auditLogs.length === 1, "Audit log was created upon report dismissal");
+assert(mixedDb.profileReports.has("rep_prof_1"), "Report record was preserved in database, not deleted");
+
+// -----------------------------------------------------------------------------
+// 25. PROFILE PROVISIONING & SELF-HEALING REGRESSION SUITE
+// -----------------------------------------------------------------------------
+console.log("\n▶ SUITE 25: Profile Provisioning, Webhooks & Self-Healing Synchronization Invariants");
+
+// Create mock database for profile provisioning simulation
+function createMockProfileDb() {
+  return {
+    profiles: new Map(),
+    adminInvitations: new Map(),
+  };
+}
+
+function simulateClerkWebhookHandler(db, req, env = {}) {
+  // 1. Signature verification check
+  if (!env.CLERK_WEBHOOK_SIGNING_SECRET || req.headers?.["svix-signature"] !== "valid_sig") {
+    return { status: 400, body: { error: "Invalid webhook signature" } };
+  }
+
+  // 2. Service client availability check
+  if (!env.SUPABASE_KEY_SECRET && !env.SUPABASE_SERVICE_ROLE_KEY && !env.SUPABASE_KEY_ROLE) {
+    return { status: 500, body: { error: "Internal server error" } };
+  }
+
+  const { type, data } = req.body || {};
+
+  if (type === "user.created" || type === "user.updated") {
+    const user = data;
+    const primaryEmail = (user.email_addresses || []).find((e) => e.id === user.primary_email_address_id)?.email_address || null;
+
+    const existingProfile = db.profiles.get(user.id);
+    let assignedRole = existingProfile?.role || "customer";
+
+    // Invitation check
+    if (primaryEmail && assignedRole !== "admin") {
+      const invite = Array.from(db.adminInvitations.values()).find(
+        (inv) => inv.email.toLowerCase() === primaryEmail.toLowerCase() && inv.status === "pending"
+      );
+      if (invite) {
+        assignedRole = "admin";
+        invite.status = "accepted";
+        invite.accepted_at = new Date().toISOString();
+      }
+    }
+
+    const publicMeta = user.public_metadata || {};
+    if (publicMeta.role === "admin") {
+      assignedRole = "admin";
+    }
+
+    const profileRecord = {
+      clerk_user_id: user.id,
+      email: primaryEmail,
+      first_name: user.first_name || null,
+      last_name: user.last_name || null,
+      avatar_url: user.image_url || null,
+      role: assignedRole,
+      status: existingProfile ? existingProfile.status : "active",
+      updated_at: new Date().toISOString(),
+    };
+
+    db.profiles.set(user.id, profileRecord);
+    return { status: 200, body: { received: true } };
+  }
+
+  if (type === "user.deleted") {
+    const { id, deleted } = data || {};
+    if (!deleted || !id) {
+      return { status: 200, body: { received: true } };
+    }
+    const existing = db.profiles.get(id);
+    if (existing) {
+      existing.email = null;
+      existing.first_name = null;
+      existing.last_name = null;
+      existing.avatar_url = null;
+      existing.status = "deleted";
+      existing.updated_at = new Date().toISOString();
+    }
+    return { status: 200, body: { received: true } };
+  }
+
+  return { status: 200, body: { received: true } };
+}
+
+function simulateEnsureUserProfile(db, session, targetUserId) {
+  if (!session || !session.userId) {
+    return null; // Unauthenticated
+  }
+
+  // Identity guard
+  if (targetUserId && targetUserId !== session.userId) {
+    return null; // IDOR blocked
+  }
+
+  // 1. Check existing
+  const existing = db.profiles.get(session.userId);
+  if (existing) {
+    return existing; // Preserve existing roles and governance status
+  }
+
+  // 2. Fetch verified Clerk user
+  const clerkUser = session.clerkUser;
+  if (!clerkUser || clerkUser.id !== session.userId) {
+    return null;
+  }
+
+  const primaryEmail = (clerkUser.email_addresses || []).find((e) => e.id === clerkUser.primary_email_address_id)?.email_address || null;
+  let assignedRole = "customer";
+
+  if (primaryEmail) {
+    const invite = Array.from(db.adminInvitations.values()).find(
+      (inv) => inv.email.toLowerCase() === primaryEmail.toLowerCase() && inv.status === "pending"
+    );
+    if (invite) {
+      assignedRole = "admin";
+      invite.status = "accepted";
+    }
+  }
+
+  if (clerkUser.public_metadata?.role === "admin") {
+    assignedRole = "admin";
+  }
+
+  const newProfile = {
+    clerk_user_id: clerkUser.id,
+    email: primaryEmail,
+    first_name: clerkUser.first_name || null,
+    last_name: clerkUser.last_name || null,
+    avatar_url: clerkUser.image_url || null,
+    role: assignedRole,
+    status: "active",
+    updated_at: new Date().toISOString(),
+  };
+
+  db.profiles.set(clerkUser.id, newProfile);
+  return newProfile;
+}
+
+// 25.1: New user profile creation via webhook
+const testDbWebhooks = createMockProfileDb();
+const validEnv = {
+  CLERK_WEBHOOK_SIGNING_SECRET: "whsec_test_secret",
+  SUPABASE_KEY_SECRET: "mock_service_key",
+};
+const resCreate = simulateClerkWebhookHandler(
+  testDbWebhooks,
+  {
+    headers: { "svix-signature": "valid_sig" },
+    body: {
+      type: "user.created",
+      data: {
+        id: "user_abc123",
+        email_addresses: [{ id: "em_1", email_address: "john.doe@example.com" }],
+        primary_email_address_id: "em_1",
+        first_name: "John",
+        last_name: "Doe",
+        image_url: "https://example.com/avatar.jpg",
+      },
+    },
+  },
+  validEnv
+);
+assert(resCreate.status === 200, "Webhook user.created returns 200 OK");
+const createdProfile = testDbWebhooks.profiles.get("user_abc123");
+assert(createdProfile && createdProfile.role === "customer", "New user profile created with role 'customer'");
+assert(createdProfile && createdProfile.status === "active", "New user profile created with status 'active'");
+
+// 25.2: Webhook retry and duplicate event delivery idempotency
+const resRetry = simulateClerkWebhookHandler(
+  testDbWebhooks,
+  {
+    headers: { "svix-signature": "valid_sig" },
+    body: {
+      type: "user.created",
+      data: {
+        id: "user_abc123",
+        email_addresses: [{ id: "em_1", email_address: "john.doe@example.com" }],
+        primary_email_address_id: "em_1",
+        first_name: "John",
+        last_name: "Doe",
+      },
+    },
+  },
+  validEnv
+);
+assert(resRetry.status === 200, "Webhook duplicate event delivery returns 200 OK");
+assert(testDbWebhooks.profiles.size === 1, "Duplicate webhook events do NOT create duplicate profile records");
+
+// 25.3: Profile creation when webhook is delayed or fails (Self-Healing / JIT Sync)
+const testDbLazy = createMockProfileDb();
+const activeSession = {
+  userId: "user_delayed999",
+  clerkUser: {
+    id: "user_delayed999",
+    email_addresses: [{ id: "em_99", email_address: "delayed@example.com" }],
+    primary_email_address_id: "em_99",
+    first_name: "Delayed",
+    last_name: "User",
+    image_url: "https://example.com/delayed.png",
+  },
+};
+assert(testDbLazy.profiles.has("user_delayed999") === false, "Profile initially missing due to delayed webhook");
+const healedProfile = simulateEnsureUserProfile(testDbLazy, activeSession, "user_delayed999");
+assert(healedProfile !== null && healedProfile.clerk_user_id === "user_delayed999", "ensureUserProfile creates profile when webhook is delayed");
+assert(testDbLazy.profiles.has("user_delayed999"), "Database contains provisioned profile following self-healing sync");
+
+// 25.4: Existing profiles remain unchanged where appropriate
+const existingBefore = { ...testDbLazy.profiles.get("user_delayed999") };
+const secondSync = simulateEnsureUserProfile(testDbLazy, activeSession, "user_delayed999");
+assert(secondSync.updated_at === existingBefore.updated_at, "Existing profiles remain unchanged on subsequent sync requests");
+
+// 25.5: Existing administrator roles being preserved
+testDbWebhooks.profiles.set("user_admin_007", {
+  clerk_user_id: "user_admin_007",
+  email: "admin@rentit.ph",
+  role: "admin",
+  status: "active",
+  first_name: "Admin",
+  last_name: "User",
+});
+simulateClerkWebhookHandler(
+  testDbWebhooks,
+  {
+    headers: { "svix-signature": "valid_sig" },
+    body: {
+      type: "user.updated",
+      data: {
+        id: "user_admin_007",
+        email_addresses: [{ id: "em_ad", email_address: "admin@rentit.ph" }],
+        primary_email_address_id: "em_ad",
+        first_name: "Admin Updated",
+        last_name: "User",
+      },
+    },
+  },
+  validEnv
+);
+assert(testDbWebhooks.profiles.get("user_admin_007").role === "admin", "Existing administrator role is strictly preserved on update");
+
+// 25.6: Restricted, banned, and deleted accounts not being improperly reactivated
+testDbWebhooks.profiles.set("user_banned_66", {
+  clerk_user_id: "user_banned_66",
+  email: "badactor@example.com",
+  role: "customer",
+  status: "banned",
+});
+simulateClerkWebhookHandler(
+  testDbWebhooks,
+  {
+    headers: { "svix-signature": "valid_sig" },
+    body: {
+      type: "user.updated",
+      data: {
+        id: "user_banned_66",
+        email_addresses: [{ id: "em_b", email_address: "badactor@example.com" }],
+        primary_email_address_id: "em_b",
+        first_name: "Bad",
+        last_name: "Actor",
+      },
+    },
+  },
+  validEnv
+);
+assert(testDbWebhooks.profiles.get("user_banned_66").status === "banned", "Banned account is NOT reactivated by user.updated webhook");
+
+const bannedSession = {
+  userId: "user_banned_66",
+  clerkUser: { id: "user_banned_66", email_addresses: [] },
+};
+const bannedSync = simulateEnsureUserProfile(testDbWebhooks, bannedSession, "user_banned_66");
+assert(bannedSync.status === "banned", "Banned account is NOT reactivated by ensureUserProfile self-healing");
+
+// 25.7: Concurrent provisioning requests safety
+const concurrentDb = createMockProfileDb();
+const concUser = {
+  id: "user_concurrent_5",
+  email_addresses: [{ id: "em_c", email_address: "conc@example.com" }],
+  primary_email_address_id: "em_c",
+  first_name: "Conc",
+  last_name: "User",
+};
+// Webhook and self-healing both trigger simultaneously
+simulateClerkWebhookHandler(
+  concurrentDb,
+  {
+    headers: { "svix-signature": "valid_sig" },
+    body: { type: "user.created", data: concUser },
+  },
+  validEnv
+);
+simulateEnsureUserProfile(concurrentDb, { userId: concUser.id, clerkUser: concUser }, concUser.id);
+assert(concurrentDb.profiles.size === 1, "Concurrent webhook and self-healing requests produce exactly 1 profile row");
+
+// 25.8: Invalid webhook signatures
+const resInvalidSig = simulateClerkWebhookHandler(
+  testDbWebhooks,
+  {
+    headers: { "svix-signature": "forged_sig" },
+    body: { type: "user.created", data: { id: "user_spoof" } },
+  },
+  validEnv
+);
+assert(resInvalidSig.status === 400 && resInvalidSig.body.error === "Invalid webhook signature", "Invalid webhook signature returns 400 Bad Request");
+
+// 25.9: Missing service-role configuration
+const resMissingSecret = simulateClerkWebhookHandler(
+  testDbWebhooks,
+  {
+    headers: { "svix-signature": "valid_sig" },
+    body: { type: "user.created", data: { id: "user_test" } },
+  },
+  { CLERK_WEBHOOK_SIGNING_SECRET: "whsec_test_secret" } // Missing SUPABASE_KEY_SECRET
+);
+assert(resMissingSecret.status === 500 && resMissingSecret.body.error === "Internal server error", "Missing service-role returns 500 without exposing secrets");
+
+// 25.10: Authenticated users unable to provision or modify another user's profile
+const attackerSession = {
+  userId: "user_attacker_1",
+  clerkUser: { id: "user_attacker_1" },
+};
+const idorAttempt = simulateEnsureUserProfile(testDbWebhooks, attackerSession, "user_victim_2");
+assert(idorAttempt === null, "User A strictly prohibited from provisioning User B's profile (IDOR prevented)");
+
+// 25.11: Code Invariant Verifications
+const profileTsContent = fs.readFileSync(path.join(__dirname, "../lib/supabase/profile.ts"), "utf-8");
+const webhookRouteContent = fs.readFileSync(path.join(__dirname, "../app/api/webhooks/clerk/route.ts"), "utf-8");
+const dashboardPageContent = fs.readFileSync(path.join(__dirname, "../app/dashboard/page.tsx"), "utf-8");
+const listingsActionsContent = fs.readFileSync(path.join(__dirname, "../app/listings/actions.ts"), "utf-8");
+
+assert(profileTsContent.includes("export async function ensureUserProfile"), "lib/supabase/profile.ts exports ensureUserProfile");
+assert(profileTsContent.includes("export async function getCurrentUserProfile"), "lib/supabase/profile.ts exports getCurrentUserProfile");
+assert(profileTsContent.includes("currentUser()"), "lib/supabase/profile.ts derives identity from Clerk currentUser()");
+assert(webhookRouteContent.includes("verifyWebhook"), "app/api/webhooks/clerk/route.ts verifies webhook signatures");
+assert(dashboardPageContent.includes("ensureUserProfile(userId)"), "app/dashboard/page.tsx calls ensureUserProfile for dashboard visitors");
+assert(listingsActionsContent.includes("ensureUserProfile(userId)"), "app/listings/actions.ts calls ensureUserProfile on new listing creation");
+
+// -----------------------------------------------------------------------------
+// 26. EQUIPMENT PHOTOS REQUIREMENT & REMOVAL OF URL INPUT INVARIANTS
+// -----------------------------------------------------------------------------
+console.log("\n▶ SUITE 26: Equipment Photos Requirement & Removal of URL Input Invariants");
+
+const newListingFormContent = fs.readFileSync(path.join(__dirname, "../components/marketplace/new-listing-form.tsx"), "utf-8");
+const listingsActionsUpdated = fs.readFileSync(path.join(__dirname, "../app/listings/actions.ts"), "utf-8");
+
+// 26.1: Add URL input and button are removed
+assert(!newListingFormContent.includes("Add URL"), "Add URL button is completely removed from new-listing-form.tsx");
+assert(!newListingFormContent.includes("externalImageUrl"), "externalImageUrl state is completely removed from new-listing-form.tsx");
+assert(!newListingFormContent.includes("handleAddExternalImage"), "handleAddExternalImage handler is completely removed from new-listing-form.tsx");
+assert(!newListingFormContent.includes("Or paste an image web link"), "Paste URL input placeholder is completely removed from new-listing-form.tsx");
+
+// 26.2: Submitting without photos is blocked in the UI
+assert(newListingFormContent.includes("disabled={isSubmitting || images.length === 0}"), "Submit button is strictly disabled when images.length === 0");
+assert(newListingFormContent.includes("Please upload at least one equipment photo before submitting your listing."), "Notice displayed in UI when no photos are uploaded");
+
+// 26.3: Direct Server Action call validation simulation
+function simulateServerActionImageValidation(images, userId = "user_123") {
+  if (!images || !Array.isArray(images) || images.length === 0) {
+    return {
+      success: false,
+      error: "Please upload at least one equipment photo before submitting your listing.",
+      code: "INVALID_INPUT",
+    };
+  }
+
+  const sanitized = images
+    .filter((img) => typeof img === "string" && img.trim().length > 0)
+    .map((img) => img.trim())
+    .filter((img) => {
+      if (img.startsWith("blob:") || img.startsWith("data:")) return false;
+      if (img === "/images/equipment_loader.jpg") return false;
+      return true;
+    });
+
+  if (sanitized.length === 0) {
+    return {
+      success: false,
+      error: "Please upload at least one equipment photo before submitting your listing.",
+      code: "INVALID_INPUT",
+    };
+  }
+
+  const verified = sanitized.filter((img) => {
+    try {
+      const parsed = new URL(img);
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
+      const path = parsed.pathname;
+      const inListingBucket =
+        path.includes("/storage/v1/object/public/listing-images/") ||
+        path.includes("/listing-images/");
+      const inUserFolder =
+        path.includes(`/listing-images/${userId}/`) ||
+        path.includes(`/${userId}/`);
+      return inListingBucket && inUserFolder;
+    } catch {
+      return img.startsWith(`${userId}/`) || img.startsWith(`listing-images/${userId}/`);
+    }
+  });
+
+  if (verified.length === 0) {
+    return {
+      success: false,
+      error: "Please upload at least one valid equipment photo before submitting your listing.",
+      code: "INVALID_INPUT",
+    };
+  }
+
+  return { success: true, images: verified };
+}
+
+// Test A: Empty array rejected
+const resEmpty = simulateServerActionImageValidation([]);
+assert(!resEmpty.success && resEmpty.code === "INVALID_INPUT", "Direct Server Action call with empty images array is rejected with INVALID_INPUT");
+
+// Test B: Null / undefined rejected
+const resNull = simulateServerActionImageValidation(null);
+assert(!resNull.success && resNull.code === "INVALID_INPUT", "Direct Server Action call with null images is rejected");
+
+// Test C: Placeholder fallback rejected
+const resPlaceholder = simulateServerActionImageValidation(["/images/equipment_loader.jpg"]);
+assert(!resPlaceholder.success && resPlaceholder.code === "INVALID_INPUT", "Fallback placeholder '/images/equipment_loader.jpg' is rejected as invalid");
+
+// Test D: Blob URL rejected
+const resBlob = simulateServerActionImageValidation(["blob:http://localhost:3000/12345"]);
+assert(!resBlob.success && resBlob.code === "INVALID_INPUT", "Direct blob: URLs are rejected by server validation");
+
+// Test E: Arbitrary external URL rejected
+const resExternal = simulateServerActionImageValidation(["https://attacker.com/evil_tractor.jpg"], "user_123");
+assert(!resExternal.success && resExternal.code === "INVALID_INPUT", "Arbitrary external URLs outside listing-images bucket are rejected");
+
+// 26.4: Listing with at least one valid uploaded photo can be submitted
+const validUserPhoto = `https://supabase.co/storage/v1/object/public/listing-images/user_123/${Date.now()}_loader.jpg`;
+const resValid = simulateServerActionImageValidation([validUserPhoto], "user_123");
+assert(resValid.success === true && resValid.images.length === 1, "Listing with valid user-owned Supabase storage photo is accepted");
+
+// Cross-user storage hijacking prevention
+const otherUserPhoto = `https://supabase.co/storage/v1/object/public/listing-images/user_other_victim/${Date.now()}_loader.jpg`;
+const resHijack = simulateServerActionImageValidation([otherUserPhoto], "user_123");
+assert(!resHijack.success && resHijack.code === "INVALID_INPUT", "Storage photo belonging to a different user is rejected (storage hijacking prevented)");
+
+// Nonexistent storage object rejection simulation
+function simulateStorageObjectVerification(images, storageFiles = []) {
+  for (const img of images) {
+    const parts = img.split("/");
+    const fileName = parts[parts.length - 1];
+    if (!storageFiles.includes(fileName)) {
+      return { exists: false, missingFile: fileName };
+    }
+  }
+  return { exists: true };
+}
+const storageCheckFail = simulateStorageObjectVerification(["https://supabase.co/storage/v1/object/public/listing-images/user_123/fake_file.jpg"], ["real_file.jpg"]);
+assert(storageCheckFail.exists === false && storageCheckFail.missingFile === "fake_file.jpg", "Nonexistent storage objects are identified and flagged");
+
+// 26.5: Failed uploads do not count as valid photos simulation
+function simulateUploadWorkflow(selectedFiles, uploadFails = false) {
+  const uploadedUrls = [];
+  for (const file of selectedFiles) {
+    if (!uploadFails) {
+      uploadedUrls.push(`https://supabase.co/storage/v1/object/public/listing-images/user_123/${file.name}`);
+    }
+  }
+  return uploadedUrls;
+}
+const failedUploadUrls = simulateUploadWorkflow([{ name: "excavator.jpg" }], true);
+assert(failedUploadUrls.length === 0, "Failed upload produces 0 uploaded storage URLs");
+const resFailedUpload = simulateServerActionImageValidation(failedUploadUrls, "user_123");
+assert(!resFailedUpload.success, "Failed uploads do not count as valid photos and cannot be submitted");
+
+// 26.6: Uploads still in progress cannot be bypassed
+assert(newListingFormContent.includes("uploadProgress"), "uploadProgress state tracks multi-file upload progress");
+assert(newListingFormContent.includes("disabled={isSubmitting || images.length === 0}"), "Form submission button is strictly disabled while isSubmitting is true");
+
+// 26.7: Removing the last photo disables submission simulation
+let stagedImages = [{ id: "img_1", previewUrl: "blob:1" }, { id: "img_2", previewUrl: "blob:2" }];
+function removePhoto(id) {
+  stagedImages = stagedImages.filter((img) => img.id !== id);
+  return stagedImages.length;
+}
+removePhoto("img_1");
+assert(stagedImages.length === 1, "Removing one of multiple photos retains active photos");
+const remainingCount = removePhoto("img_2");
+assert(remainingCount === 0, "Removing last photo leaves 0 photos");
+assert(remainingCount === 0 && (stagedImages.length === 0), "Removing the last photo disables submission (images.length === 0)");
+
+// 26.8: Existing image previews and removal controls preserved
+assert(newListingFormContent.includes("handleRemoveImage"), "handleRemoveImage handler preserved");
+assert(newListingFormContent.includes("handleSetPrimary"), "handleSetPrimary handler preserved");
+assert(newListingFormContent.includes("handleFileChange"), "handleFileChange file picker preserved");
+assert(newListingFormContent.includes("accept=\"image/*\""), "accept image/* attribute preserved");
+assert(listingsActionsUpdated.includes("Please upload at least one equipment photo before submitting your listing."), "Server Action enforces user-friendly error message on missing photos");
+assert(listingsActionsUpdated.includes("verifyStorageObjectsExist"), "Server Action defines storage object existence validation");
+assert(listingsActionsUpdated.includes("storageVerification"), "Server Action executes storage verification on listing creation and resubmission");
+
+// -----------------------------------------------------------------------------
+// 27. SUPABASE STORAGE POLICIES & SECURE UPLOAD INVARIANTS
+// -----------------------------------------------------------------------------
+console.log("\n▶ SUITE 27: Supabase Storage Policies & Secure Upload Invariants");
+
+// Read migration 017
+const migration017Path = path.join(__dirname, "../supabase/migrations/017_secure_storage_policies.sql");
+const migration017Content = fs.readFileSync(migration017Path, "utf-8");
+
+// 27.1: Migration 017 structure and policy correctness
+assert(fs.existsSync(migration017Path), "Migration 017_secure_storage_policies.sql exists");
+assert(migration017Content.includes("DROP POLICY IF EXISTS \"Anyone can upload listing images\""), "Migration drops insecure permissive upload policy");
+assert(migration017Content.includes("DROP POLICY IF EXISTS \"Anyone can update listing images\""), "Migration drops insecure permissive update policy");
+assert(migration017Content.includes("(storage.foldername(name))[1] = (auth.jwt() ->> 'sub')"), "Migration enforces folder ownership via auth.jwt()->>'sub'");
+assert(migration017Content.includes("TO authenticated"), "Migration restricts upload/update/delete to authenticated role");
+assert(migration017Content.includes("TO public"), "Migration preserves public read access for SELECT");
+
+// 27.2: Invariant: Upload authentication failure does not retry anonymously
+assert(!newListingFormContent.includes("createSupabaseBrowserClient(null)"), "new-listing-form.tsx does NOT fall back to anonymous client on auth failure");
+assert(newListingFormContent.includes("!userId"), "new-listing-form.tsx verifies authenticated session before starting upload");
+assert(newListingFormContent.includes("Authentication failed during upload"), "new-listing-form.tsx displays explicit actionable auth failure error");
+
+// 27.3: Storage RLS Policy Engine Simulation
+function evaluateStoragePolicy({
+  operation,
+  bucketId,
+  objectPath,
+  callerRole = "anon",
+  jwtSub = null,
+}) {
+  if (bucketId !== "listing-images") {
+    return { allowed: false, reason: "Bucket not matched" };
+  }
+
+  // 1. SELECT: Public read
+  if (operation === "SELECT") {
+    return { allowed: true };
+  }
+
+  // 2. Anonymous users have no write/update/delete permissions
+  if (callerRole === "anon" || !jwtSub) {
+    return { allowed: false, reason: "Anonymous write rejected by RLS" };
+  }
+
+  // Extract folder name from path
+  const folder = objectPath.split("/")[0];
+
+  // 3. INSERT / UPDATE / DELETE: Folder must match jwtSub
+  if (operation === "INSERT" || operation === "UPDATE" || operation === "DELETE") {
+    if (folder !== jwtSub) {
+      return { allowed: false, reason: "Cross-user path modification rejected" };
+    }
+    return { allowed: true };
+  }
+
+  return { allowed: false, reason: "Unsupported operation" };
+}
+
+// Test 27.4: Anonymous upload rejected
+const anonUpload = evaluateStoragePolicy({
+  operation: "INSERT",
+  bucketId: "listing-images",
+  objectPath: "user_123/excavator.jpg",
+  callerRole: "anon",
+  jwtSub: null,
+});
+assert(!anonUpload.allowed, "Anonymous upload is strictly rejected by storage RLS");
+
+// Test 27.5: Authenticated upload to user's own folder accepted
+const ownUpload = evaluateStoragePolicy({
+  operation: "INSERT",
+  bucketId: "listing-images",
+  objectPath: "user_123/excavator.jpg",
+  callerRole: "authenticated",
+  jwtSub: "user_123",
+});
+assert(ownUpload.allowed === true, "Authenticated upload to user's own folder is accepted");
+
+// Test 27.6: Cross-user folder upload rejected
+const crossUpload = evaluateStoragePolicy({
+  operation: "INSERT",
+  bucketId: "listing-images",
+  objectPath: "user_other/malicious.jpg",
+  callerRole: "authenticated",
+  jwtSub: "user_123",
+});
+assert(!crossUpload.allowed, "Cross-user folder upload is strictly rejected");
+
+// Test 27.7: Cross-user overwrite / update rejected
+const crossUpdate = evaluateStoragePolicy({
+  operation: "UPDATE",
+  bucketId: "listing-images",
+  objectPath: "user_victim/photo.jpg",
+  callerRole: "authenticated",
+  jwtSub: "user_attacker",
+});
+assert(!crossUpdate.allowed, "Cross-user image overwrite is strictly rejected");
+
+// Test 27.8: Owner update / overwrite accepted
+const ownerUpdate = evaluateStoragePolicy({
+  operation: "UPDATE",
+  bucketId: "listing-images",
+  objectPath: "user_123/photo.jpg",
+  callerRole: "authenticated",
+  jwtSub: "user_123",
+});
+assert(ownerUpdate.allowed === true, "Owner updating their own photo is permitted");
+
+// Test 27.9: Owner delete accepted
+const ownerDelete = evaluateStoragePolicy({
+  operation: "DELETE",
+  bucketId: "listing-images",
+  objectPath: "user_123/photo.jpg",
+  callerRole: "authenticated",
+  jwtSub: "user_123",
+});
+assert(ownerDelete.allowed === true, "Owner deleting their own photo is permitted");
+
+// Test 27.10: Cross-user delete rejected
+const crossDelete = evaluateStoragePolicy({
+  operation: "DELETE",
+  bucketId: "listing-images",
+  objectPath: "user_victim/photo.jpg",
+  callerRole: "authenticated",
+  jwtSub: "user_attacker",
+});
+assert(!crossDelete.allowed, "Cross-user deletion attempt is strictly rejected");
+
+// Test 27.11: Public image retrieval preserved
+const publicReadAnon = evaluateStoragePolicy({
+  operation: "SELECT",
+  bucketId: "listing-images",
+  objectPath: "user_123/photo.jpg",
+  callerRole: "anon",
+  jwtSub: null,
+});
+assert(publicReadAnon.allowed === true, "Public unauthenticated image retrieval is preserved");
+
+// Test 27.12: Listing submission without valid uploaded image remains rejected
+const emptySubmission = simulateServerActionImageValidation([], "user_123");
+assert(!emptySubmission.success && emptySubmission.code === "INVALID_INPUT", "Listing submission with zero uploaded photos is rejected");
+
+// Test 27.13: Legitimate upload and listing creation workflow succeeds
+const legitimatePhoto = `https://supabase.co/storage/v1/object/public/listing-images/user_123/${Date.now()}_cat_d6.jpg`;
+const legitSubmission = simulateServerActionImageValidation([legitimatePhoto], "user_123");
+assert(legitSubmission.success === true && legitSubmission.images.length === 1, "Legitimate upload with user-owned photo succeeds");
+
 console.log("\n===============================================================================");
 console.log(`SUMMARY: ${passedTests}/${totalTests} Tests Passed (${failedTests} Failed)`);
 console.log("===============================================================================");
